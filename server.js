@@ -5,74 +5,75 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 🚨 CRITICAL: Paystack requires the RAW body to verify the signature.
-// If Express parses the JSON before we check the signature, the bytes change and it will fail.
 app.use(express.json({
-    verify: (req, res, buf) => {
-        req.rawBody = buf;
-    }
+    verify: (req, res, buf) => { req.rawBody = buf; }
 }));
 
-// The Webhook Endpoint
-app.post('/webhook', (req, res) => {
-    // 1. Get the signature from the headers
+// 🗄️ MOCK DATABASE (We will replace this with MongoDB)
+const developers = {
+    'neatly-app': { name: 'Neatly', paystackSecret: process.env.PAYSTACK_SECRET_KEY },
+    'super-game': { name: 'Super Game', paystackSecret: 'sk_test_fake_key_for_super_game_123' }
+};
+
+// Keeps track of who is Pro!
+const entitlements = {}; 
+
+// ==========================================
+// 1. THE WEBHOOK (The "Flipper")
+// ==========================================
+app.post('/webhook/:app_id', (req, res) => {
+    const appId = req.params.app_id;
+    const developer = developers[appId];
+    
+    if (!developer) return res.status(404).send('App not found');
+
     const signature = req.headers['x-paystack-signature'];
-    if (!signature) {
-        return res.status(400).send('No signature provided');
-    }
+    if (!signature) return res.status(400).send('No signature');
 
-    // 2. Get the secret key (In production, you will look this up based on the app_id in the URL/body)
-    const secret = process.env.PAYSTACK_SECRET_KEY;
-
-    // 3. Compute the expected signature using HMAC-SHA512 over the RAW body
     const expectedSignature = crypto
-        .createHmac('sha512', secret)
+        .createHmac('sha512', developer.paystackSecret)
         .update(req.rawBody)
         .digest('hex');
 
-    // 4. Compare securely (timingSafeEqual prevents timing attacks)
     const isVerified = crypto.timingSafeEqual(
         Buffer.from(signature),
         Buffer.from(expectedSignature)
     );
 
-    if (!isVerified) {
-        console.warn('❌ Invalid signature attempt');
-        return res.status(401).send('Invalid signature');
-    }
+    if (!isVerified) return res.status(401).send('Invalid signature');
 
-    // 5. Signature is valid! Process the event
     const event = req.body;
-    
     if (event.event === 'charge.success') {
-        const data = event.data;
-        
-        // Extract the metadata you passed during checkout
-        const metadata = data.metadata || {};
-        const appId = metadata.app_id;
+        const metadata = event.data.metadata || {};
         const userId = metadata.user_id;
-        const purchaseId = metadata.purchase_id;
-
-        console.log(`✅ Payment verified for App: ${appId}, User: ${userId}`);
-        console.log(`💰 Amount: ${data.amount / 100} ${data.currency}`);
-
-        // 🛑 TODO: Here is where you "Flip" the switch in your database!
-        // Example: db.collection('entitlements').updateOne(
-        //    { user_id: userId, app_id: appId },
-        //    { $set: { tier: 'pro', paid_at: new Date() } }
-        // );
-
-    } else {
-        console.log(`ℹ️ Received unhandled event: ${event.event}`);
+        
+        // 🎯 THE FLIP: Save the user as Pro in the database!
+        entitlements[`${appId}_${userId}`] = 'pro';
+        
+        console.log(`✅ [${developer.name}] Flipped User ${userId} to PRO`);
     }
 
-    // 6. Always return 200 OK so Paystack knows you received it and stops retrying
     res.status(200).send('Webhook received');
 });
 
-// A simple health check route
-app.get('/', (req, res) => {
-    res.send('FlipStack Webhook Server is running.');
+// ==========================================
+// 2. THE ENTITLEMENT API (The App calls this)
+// ==========================================
+app.get('/api/entitlement', (req, res) => {
+    const { app_id, user_id } = req.query;
+
+    if (!app_id || !user_id) {
+        return res.status(400).json({ error: 'Missing app_id or user_id' });
+    }
+
+    // Check the database
+    const status = entitlements[`${app_id}_${user_id}`] || 'free';
+    
+    res.json({
+        app_id,
+        user_id,
+        tier: status
+    });
 });
 
 app.listen(PORT, () => {
