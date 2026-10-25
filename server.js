@@ -6,21 +6,13 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// CRITICAL: Keep raw body for webhook verification
 app.use(express.json({
     verify: (req, res, buf) => { req.rawBody = buf; }
 }));
 
-// 🗄️ MOCK DEVELOPERS (We'll move this to the database later)
-const developers = {
-    'neatly-app': { name: 'Neatly', paystackSecret: process.env.PAYSTACK_SECRET_KEY },
-    'super-game': { name: 'Super Game', paystackSecret: 'sk_test_fake_key_for_super_game_123' }
-};
-
-// ==========================================
-// DATABASE CONNECTION & SERVER STARTUP
-// ==========================================
 const client = new MongoClient(process.env.MONGODB_URI);
-let db, entitlements;
+let db, entitlements, apps;
 
 async function startServer() {
     try {
@@ -29,8 +21,8 @@ async function startServer() {
         
         db = client.db('flipstack');
         entitlements = db.collection('entitlements');
+        apps = db.collection('apps'); // NEW: Collection for developers
 
-        // Start the Express server only AFTER database connects
         app.listen(PORT, () => {
             console.log(`🚀 FlipStack listening on port ${PORT}`);
         });
@@ -40,19 +32,56 @@ async function startServer() {
 }
 
 // ==========================================
-// 1. THE WEBHOOK (The "Flipper")
+// 1. REGISTER APP (Developer Onboarding)
+// ==========================================
+app.post('/api/register-app', async (req, res) => {
+    const { name, paystack_secret } = req.body;
+
+    if (!name || !paystack_secret) {
+        return res.status(400).json({ error: 'Name and paystack_secret are required' });
+    }
+
+    // Generate a unique app_id (e.g., neatly-app-x8f9)
+    const baseSlug = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    const randomSuffix = crypto.randomBytes(2).toString('hex');
+    const app_id = `${baseSlug}-${randomSuffix}`;
+
+    try {
+        await apps.insertOne({
+            app_id,
+            name,
+            paystack_secret,
+            created_at: new Date()
+        });
+
+        console.log(`✅ Registered new app: ${name} (${app_id})`);
+        
+        res.json({
+            success: true,
+            app_id,
+            webhook_url: `https://api.flipstack.treasuretrail.africa/webhook/${app_id}`
+        });
+    } catch (err) {
+        console.error('Registration error:', err);
+        res.status(500).json({ error: 'Failed to register app' });
+    }
+});
+
+// ==========================================
+// 2. THE WEBHOOK (The "Flipper")
 // ==========================================
 app.post('/webhook/:app_id', async (req, res) => {
     const appId = req.params.app_id;
-    const developer = developers[appId];
     
+    // Look up the developer in MongoDB instead of the hardcoded object
+    const developer = await apps.findOne({ app_id: appId });
     if (!developer) return res.status(404).send('App not found');
 
     const signature = req.headers['x-paystack-signature'];
     if (!signature) return res.status(400).send('No signature');
 
     const expectedSignature = crypto
-        .createHmac('sha512', developer.paystackSecret)
+        .createHmac('sha512', developer.paystack_secret)
         .update(req.rawBody)
         .digest('hex');
 
@@ -69,8 +98,6 @@ app.post('/webhook/:app_id', async (req, res) => {
         const userId = metadata.user_id;
         
         try {
-            // 🎯 THE FLIP: Save to MongoDB! 
-            // If the user exists, update them. If not, create them (upsert).
             await entitlements.updateOne(
                 { app_id: appId, user_id: userId },
                 { $set: { tier: 'pro', updated_at: new Date() } },
@@ -87,7 +114,7 @@ app.post('/webhook/:app_id', async (req, res) => {
 });
 
 // ==========================================
-// 2. THE ENTITLEMENT API (The App calls this)
+// 3. THE ENTITLEMENT API
 // ==========================================
 app.get('/api/entitlement', async (req, res) => {
     const { app_id, user_id } = req.query;
@@ -97,9 +124,7 @@ app.get('/api/entitlement', async (req, res) => {
     }
 
     try {
-        // Look up the user in MongoDB
         const record = await entitlements.findOne({ app_id, user_id });
-        
         res.json({
             app_id,
             user_id,
