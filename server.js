@@ -5,6 +5,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
@@ -136,7 +137,7 @@ app.post('/api/apps', authenticateToken, async (req, res) => {
             description: description || 'No description provided.',
             price: price || 0,
             icon_url: icon_url || '',
-            aspect_ratio: aspect_ratio || '9 / 20', // NEW FIELD
+            aspect_ratio: aspect_ratio || '9 / 20',
             created_at: new Date()
         };
         await apps.insertOne(newApp);
@@ -155,10 +156,67 @@ app.get('/api/storefront/apps', async (req, res) => {
             description: app.description || 'Check out this app on FlipStack.',
             price: app.price || 0,
             icon_url: app.icon_url || '',
-            aspect_ratio: app.aspect_ratio || '9 / 20' // NEW FIELD
+            aspect_ratio: app.aspect_ratio || '9 / 20'
         }));
         res.json({ apps: publicApps });
     } catch (err) { res.status(500).json({ error: 'Failed to load storefront apps' }); }
+});
+
+// ==========================================
+// THE FLIPPER: CHECKOUT INITIATION
+// ==========================================
+app.post('/api/checkout/initiate', async (req, res) => {
+    const { app_id, email, user_id } = req.body; // ADDED user_id
+    
+    if (!app_id || !email || !user_id) {
+        return res.status(400).json({ error: 'app_id, email, and user_id are required' });
+    }
+
+    try {
+        const appRecord = await apps.findOne({ app_id });
+        if (!appRecord) return res.status(404).json({ error: 'App not found' });
+        
+        if (appRecord.price <= 0) {
+            return res.status(400).json({ error: 'This app is free' });
+        }
+
+        const payload = {
+            email: email,
+            amount: appRecord.price, 
+            metadata: {
+                app_id: app_id,
+                user_id: user_id, // CRITICAL: The webhook needs this to flip the user!
+                custom_fields: [
+                    {
+                        display_name: "App Name",
+                        variable_name: "app_name",
+                        value: appRecord.name
+                    }
+                ]
+            }
+        };
+
+        const paystackResponse = await axios.post(
+            'https://api.paystack.co/transaction/initialize',
+            payload,
+            {
+                headers: {
+                    Authorization: `Bearer ${appRecord.paystack_secret}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        res.json({
+            success: true,
+            access_code: paystackResponse.data.data.access_code,
+            authorization_url: paystackResponse.data.data.authorization_url
+        });
+
+    } catch (err) {
+        console.error('Paystack Initiation Error:', err.response?.data || err.message);
+        res.status(500).json({ error: 'Failed to initialize checkout with Paystack' });
+    }
 });
 
 // WEBHOOK & ENTITLEMENT
