@@ -12,10 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors({
-    origin: [
-        'https://flipstack.treasuretrail.africa',
-        'https://www.flipstack.treasuretrail.africa'
-    ],
+    origin: ['https://flipstack.treasuretrail.africa', 'https://www.flipstack.treasuretrail.africa'],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
@@ -30,24 +27,19 @@ let db, entitlements, apps, developers, transactions;
 async function startServer() {
     try {
         await client.connect();
-        console.log('✅ Connected to MongoDB Atlas');
         db = client.db('flipstack');
         entitlements = db.collection('entitlements');
         apps = db.collection('apps'); 
         developers = db.collection('developers');
         transactions = db.collection('transactions'); 
-
         app.listen(PORT, () => console.log(`🚀 FlipStack listening on port ${PORT}`));
-    } catch (err) {
-        console.error('❌ Failed to connect to MongoDB', err);
-    }
+    } catch (err) { console.error('❌ Failed to connect to MongoDB', err); }
 }
 
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
-
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) return res.status(403).json({ error: 'Forbidden' });
         req.user = user;
@@ -74,7 +66,7 @@ app.post('/api/auth/login', async (req, res) => {
     try {
         const dev = await developers.findOne({ email: email.toLowerCase() });
         if (!dev || !(await bcrypt.compare(password, dev.password))) return res.status(401).json({ error: 'Invalid credentials' });
-        const accessToken = jwt.sign({ id: dev._id.toString(), email: dev.email }, process.env.JWT_SECRET, { expiresIn: '15m' });
+        const accessToken = jwt.sign({ id: dev._id.toString(), email: dev.email }, process.env.JWT_SECRET, { expiresIn: '24h' });
         const refreshToken = jwt.sign({ id: dev._id.toString() }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
         res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 7 * 24 * 60 * 60 * 1000 });
         res.json({ accessToken, developer: { id: dev._id, email: dev.email, name: dev.name } });
@@ -86,7 +78,7 @@ app.post('/api/auth/refresh', (req, res) => {
     if (!token) return res.status(401).json({ error: 'No refresh token' });
     try {
         const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
-        const accessToken = jwt.sign({ id: decoded.id }, process.env.JWT_SECRET, { expiresIn: '15m' });
+        const accessToken = jwt.sign({ id: decoded.id }, process.env.JWT_SECRET, { expiresIn: '24h' });
         res.json({ accessToken });
     } catch (err) { res.clearCookie('refreshToken'); res.status(401).json({ error: 'Invalid refresh token' }); }
 });
@@ -100,7 +92,7 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// DEVELOPER SETTINGS & KEYS
+// DEV SETTINGS & KEYS
 app.get('/api/dev/keys', authenticateToken, async (req, res) => {
     try {
         const dev = await developers.findOne({ _id: new ObjectId(req.user.id) });
@@ -145,38 +137,32 @@ app.get('/api/apps', authenticateToken, async (req, res) => {
     try {
         const myApps = await apps.find({ developerId: req.user.id }).toArray();
         const safeApps = myApps.map(app => ({
-            id: app._id,
-            app_id: app.app_id,
-            name: app.name,
+            id: app._id, app_id: app.app_id, name: app.name,
             webhook_url: `https://api.flipstack.treasuretrail.africa/webhook/${app.app_id}`,
-            category: app.category,
-            description: app.description,
-            price: app.price,
-            icon_url: app.icon_url,
-            aspect_ratio: app.aspect_ratio,
-            created_at: app.created_at
+            category: app.category, description: app.description, price: app.price,
+            icon_url: app.icon_url, aspect_ratio: app.aspect_ratio, app_url: app.app_url || '', created_at: app.created_at
         }));
         res.json({ apps: safeApps });
     } catch (err) { res.status(500).json({ error: 'Failed to fetch apps' }); }
 });
 
 app.post('/api/apps', authenticateToken, async (req, res) => {
-    const { name, category, description, price, icon_url, aspect_ratio } = req.body;
+    const { name, category, description, price, icon_url, aspect_ratio, app_url } = req.body;
     if (!name) return res.status(400).json({ error: 'App name required' });
     const baseSlug = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
     const randomSuffix = crypto.randomBytes(2).toString('hex');
     const app_id = `${baseSlug}-${randomSuffix}`;
     try {
-        const newApp = { developerId: req.user.id, app_id, name, category: category || 'Utilities', description: description || 'No description provided.', price: price || 0, icon_url: icon_url || '', aspect_ratio: aspect_ratio || '9 / 20', created_at: new Date() };
+        const newApp = { developerId: req.user.id, app_id, name, category: category || 'Utilities', description: description || 'No description.', price: price || 0, icon_url: icon_url || '', aspect_ratio: aspect_ratio || '9 / 20', app_url: app_url || '', created_at: new Date() };
         await apps.insertOne(newApp);
         res.status(201).json({ success: true, app_id });
     } catch (err) { res.status(500).json({ error: 'Failed to register app' }); }
 });
 
 app.put('/api/apps/:id', authenticateToken, async (req, res) => {
-    const { name, category, description, price, icon_url, aspect_ratio } = req.body;
+    const { name, category, description, price, icon_url, aspect_ratio, app_url } = req.body;
     try {
-        const result = await apps.updateOne({ app_id: req.params.id, developerId: req.user.id }, { $set: { name, category, description, price, icon_url, aspect_ratio } });
+        const result = await apps.updateOne({ app_id: req.params.id, developerId: req.user.id }, { $set: { name, category, description, price, icon_url, aspect_ratio, app_url } });
         if (result.matchedCount === 0) return res.status(404).json({ error: 'App not found' });
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: 'Failed to update app' }); }
@@ -190,7 +176,7 @@ app.delete('/api/apps/:id', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'Failed to delete app' }); }
 });
 
-// PAYOUTS & TRANSACTIONS
+// PAYOUTS
 app.get('/api/dev/payouts', authenticateToken, async (req, res) => {
     try {
         const txs = await transactions.find({ developerId: req.user.id }).sort({ date: -1 }).toArray();
@@ -202,75 +188,80 @@ app.get('/api/dev/payouts', authenticateToken, async (req, res) => {
 
 // STOREFRONT API
 app.get('/api/storefront/apps', async (req, res) => {
+    // FORCE NO CACHE
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
     try {
         const allApps = await apps.find({}).toArray();
         const publicApps = allApps.map(app => ({
-            app_id: app.app_id,
-            name: app.name,
-            category: app.category || 'App',
-            description: app.description || 'Check out this app on FlipStack.',
-            price: app.price || 0,
-            icon_url: app.icon_url || '',
-            aspect_ratio: app.aspect_ratio || '9 / 20'
+            app_id: app.app_id, name: app.name, category: app.category || 'App', description: app.description || '', price: app.price || 0, icon_url: app.icon_url || '', aspect_ratio: app.aspect_ratio || '9 / 20', app_url: app.app_url || ''
         }));
         res.json({ apps: publicApps });
     } catch (err) { res.status(500).json({ error: 'Failed to load storefront apps' }); }
 });
 
-// THE FLIPPER: CHECKOUT INITIATION
+// CHECKOUT
 app.post('/api/checkout/initiate', async (req, res) => {
     const { app_id, email, user_id } = req.body;
     if (!app_id || !email || !user_id) return res.status(400).json({ error: 'Missing fields' });
-
     try {
         const appRecord = await apps.findOne({ app_id });
-        if (!appRecord) return res.status(404).json({ error: 'App not found' });
-        if (appRecord.price <= 0) return res.status(400).json({ error: 'This app is free' });
-
+        if (!appRecord || appRecord.price <= 0) return res.status(400).json({ error: 'Invalid app' });
         const dev = await developers.findOne({ _id: new ObjectId(appRecord.developerId) });
         const secretKey = dev?.paystack_secret_key || appRecord.paystack_secret;
-        if (!secretKey) return res.status(400).json({ error: 'Developer has not configured a Paystack Secret Key.' });
+        if (!secretKey) return res.status(400).json({ error: 'No Paystack key configured.' });
 
-        const payload = {
-            email: email,
-            amount: appRecord.price, 
-            metadata: {
-                app_id: app_id,
-                user_id: user_id,
-                custom_fields: [{ display_name: "App Name", variable_name: "app_name", value: appRecord.name }]
-            }
-        };
-
-        const paystackResponse = await axios.post('https://api.paystack.co/transaction/initialize', payload, {
-            headers: { Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/json' }
-        });
-
+        const payload = { email, amount: appRecord.price, metadata: { app_id, user_id, custom_fields: [{ display_name: "App Name", variable_name: "app_name", value: appRecord.name }] } };
+        const paystackResponse = await axios.post('https://api.paystack.co/transaction/initialize', payload, { headers: { Authorization: `Bearer ${secretKey}` } });
         res.json({ success: true, access_code: paystackResponse.data.data.access_code });
-    } catch (err) {
-        console.error('Paystack Error:', err.response?.data || err.message);
-        res.status(500).json({ error: 'Failed to initialize checkout' });
-    }
+    } catch (err) { res.status(500).json({ error: 'Failed to initialize checkout' }); }
 });
 
-// BATCH ENTITLEMENT CHECK (NEW)
+// BATCH ENTITLEMENT
 app.post('/api/entitlement/batch', async (req, res) => {
     const { user_id, app_ids } = req.body;
-    if (!user_id || !Array.isArray(app_ids)) return res.status(400).json({ error: 'Missing user_id or app_ids array' });
-
+    if (!user_id || !Array.isArray(app_ids)) return res.status(400).json({ error: 'Missing fields' });
     try {
-        // Find all pro entitlements for this user
-        const proRecords = await entitlements.find({ user_id: user_id, tier: 'pro' }).toArray();
-        
-        // Create a map: { "app_id_1": "pro", "app_id_2": "pro" }
+        const proRecords = await entitlements.find({ user_id, tier: 'pro' }).toArray();
         const entitlementsMap = {};
-        proRecords.forEach(record => {
-            entitlementsMap[record.app_id] = 'pro';
+        proRecords.forEach(record => { entitlementsMap[record.app_id] = 'pro'; });
+        res.json({ entitlements: entitlementsMap });
+    } catch (err) { res.status(500).json({ error: 'Database error' }); }
+});
+
+// SIMULATE PURCHASE
+app.post('/api/dev/simulate-purchase', authenticateToken, async (req, res) => {
+    const { app_id, user_id } = req.body;
+    if (!app_id || !user_id) return res.status(400).json({ error: 'Missing app_id or user_id' });
+    
+    try {
+        const appRecord = await apps.findOne({ app_id, developerId: req.user.id });
+        if (!appRecord) return res.status(404).json({ error: 'App not found or unauthorized' });
+
+        await entitlements.updateOne(
+            { app_id, user_id },
+            { $set: { tier: 'pro', updated_at: new Date() } },
+            { upsert: true }
+        );
+
+        await transactions.insertOne({
+            developerId: req.user.id,
+            app_id,
+            app_name: appRecord.name,
+            user_id,
+            amount: 0,
+            reference: 'DEV_TEST_' + Date.now(),
+            email: req.user.email || 'dev@test.com',
+            status: 'test_successful',
+            date: new Date()
         });
 
-        res.json({ entitlements: entitlementsMap });
+        res.json({ success: true, message: 'Test purchase simulated' });
     } catch (err) { 
-        console.error('Batch Entitlement Error:', err);
-        res.status(500).json({ error: 'Database error' }); 
+        console.error('Simulation Error:', err);
+        res.status(500).json({ error: err.message || 'Failed to simulate purchase' }); 
     }
 });
 
@@ -280,7 +271,6 @@ app.post('/webhook/:app_id', async (req, res) => {
     if (!developer) return res.status(404).send('App not found');
     const signature = req.headers['x-paystack-signature'];
     if (!signature) return res.status(400).send('No signature');
-    
     const dev = await developers.findOne({ _id: new ObjectId(developer.developerId) });
     const secretKey = dev?.paystack_secret_key || developer.paystack_secret;
     if (!secretKey) return res.status(500).send('No key configured');
@@ -292,20 +282,9 @@ app.post('/webhook/:app_id', async (req, res) => {
     if (event.event === 'charge.success') {
         const userId = event.data.metadata?.user_id;
         const amount = event.data.amount / 100; 
-        
         if (userId) {
             await entitlements.updateOne({ app_id: req.params.app_id, user_id: userId }, { $set: { tier: 'pro', updated_at: new Date() } }, { upsert: true });
-            await transactions.insertOne({
-                developerId: developer.developerId,
-                app_id: req.params.app_id,
-                app_name: developer.name,
-                user_id: userId,
-                amount: amount,
-                reference: event.data.reference,
-                email: event.data.customer.email,
-                status: 'successful',
-                date: new Date()
-            });
+            await transactions.insertOne({ developerId: developer.developerId, app_id: req.params.app_id, app_name: developer.name, user_id: userId, amount, reference: event.data.reference, email: event.data.customer.email, status: 'successful', date: new Date() });
             console.log(`✅ [${developer.name}] Flipped User ${userId} to PRO and logged R${amount}`);
         }
     }
