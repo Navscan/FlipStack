@@ -15,7 +15,6 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Ensure upload directories exist
 const apkDir = '/var/www/flipstack-frontend/uploads/apks';
 const iconDir = '/var/www/flipstack-frontend/uploads/icons';
 const screenshotDir = '/var/www/flipstack-frontend/uploads/screenshots';
@@ -24,13 +23,10 @@ if (!fs.existsSync(iconDir)) fs.mkdirSync(iconDir, { recursive: true });
 if (!fs.existsSync(screenshotDir)) fs.mkdirSync(screenshotDir, { recursive: true });
 
 const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, '/var/www/flipstack-frontend/uploads/');
-    },
+    destination: function (req, file, cb) { cb(null, '/var/www/flipstack-frontend/uploads/'); },
     filename: function (req, file, cb) {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const ext = path.extname(file.originalname);
-        cb(null, file.fieldname + '-' + uniqueSuffix + ext);
+        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
     }
 });
 const upload = multer({ storage: storage });
@@ -164,15 +160,13 @@ app.get('/api/apps', authenticateToken, async (req, res) => {
             id: app._id, app_id: app.app_id, name: app.name,
             webhook_url: `https://api.flipstack.treasuretrail.africa/webhook/${app.app_id}`,
             category: app.category, description: app.description, price: app.price,
-            icon_url: app.icon_url || '', 
-            screenshot_url: app.screenshot_url || '',
+            icon_url: app.icon_url || '', screenshot_url: app.screenshot_url || '',
             aspect_ratio: app.aspect_ratio, app_url: app.app_url || '', created_at: app.created_at
         }));
         res.json({ apps: safeApps });
     } catch (err) { res.status(500).json({ error: 'Failed to fetch apps' }); }
 });
 
-// CREATE APP
 app.post('/api/apps', authenticateToken, upload.fields([
     { name: 'apk_file', maxCount: 1 }, 
     { name: 'icon_file', maxCount: 1 },
@@ -200,7 +194,14 @@ app.post('/api/apps', authenticateToken, upload.fields([
         if (req.files && req.files['icon_file']) {
             const iconFile = req.files['icon_file'][0];
             const finalIconPath = path.join(iconDir, `${app_id}.png`);
-            await sharp(iconFile.path).resize(512, 512, { fit: 'cover' }).png().toFile(finalIconPath);
+            
+            // OPTION 1: SAFE ZONE PADDING
+            await sharp(iconFile.path)
+                .resize(460, 460, { fit: 'inside', withoutEnlargement: true })
+                .extend({ top: 26, bottom: 26, left: 26, right: 26, background: { r: 15, g: 15, b: 19, alpha: 1 } })
+                .png()
+                .toFile(finalIconPath);
+                
             fs.unlinkSync(iconFile.path);
             icon_url = `https://flipstack.treasuretrail.africa/uploads/icons/${app_id}.png`;
         }
@@ -208,7 +209,6 @@ app.post('/api/apps', authenticateToken, upload.fields([
         if (req.files && req.files['screenshot_file']) {
             const ssFile = req.files['screenshot_file'][0];
             const finalSsPath = path.join(screenshotDir, `${app_id}.jpg`);
-            // Resize to a standard 9:20 poster (1080x2400) or keep aspect
             await sharp(ssFile.path).resize(1080, 2400, { fit: 'cover' }).jpeg({ quality: 80 }).toFile(finalSsPath);
             fs.unlinkSync(ssFile.path);
             screenshot_url = `https://flipstack.treasuretrail.africa/uploads/screenshots/${app_id}.jpg`;
@@ -233,15 +233,18 @@ app.post('/api/apps', authenticateToken, upload.fields([
     }
 });
 
-// UPDATE APP
 app.put('/api/apps/:id', authenticateToken, upload.fields([
     { name: 'apk_file', maxCount: 1 }, 
     { name: 'icon_file', maxCount: 1 },
     { name: 'screenshot_file', maxCount: 1 }
 ]), async (req, res) => {
-    const { name, category, description, price, aspect_ratio } = req.body;
+    let updateFields = {};
     
-    let updateFields = { name, category, description, price, aspect_ratio };
+    if (req.body.name !== undefined) updateFields.name = req.body.name;
+    if (req.body.category !== undefined) updateFields.category = req.body.category;
+    if (req.body.description !== undefined) updateFields.description = req.body.description;
+    if (req.body.price !== undefined) updateFields.price = Number(req.body.price);
+    if (req.body.aspect_ratio !== undefined) updateFields.aspect_ratio = req.body.aspect_ratio;
     
     try {
         if (req.files && req.files['apk_file']) {
@@ -254,7 +257,14 @@ app.put('/api/apps/:id', authenticateToken, upload.fields([
         if (req.files && req.files['icon_file']) {
             const iconFile = req.files['icon_file'][0];
             const finalIconPath = path.join(iconDir, `${req.params.id}.png`);
-            await sharp(iconFile.path).resize(512, 512, { fit: 'cover' }).png().toFile(finalIconPath);
+            
+            // OPTION 1: SAFE ZONE PADDING
+            await sharp(iconFile.path)
+                .resize(460, 460, { fit: 'inside', withoutEnlargement: true })
+                .extend({ top: 26, bottom: 26, left: 26, right: 26, background: { r: 15, g: 15, b: 19, alpha: 1 } })
+                .png()
+                .toFile(finalIconPath);
+
             fs.unlinkSync(iconFile.path);
             updateFields.icon_url = `https://flipstack.treasuretrail.africa/uploads/icons/${req.params.id}.png`;
         }
@@ -267,10 +277,16 @@ app.put('/api/apps/:id', authenticateToken, upload.fields([
             updateFields.screenshot_url = `https://flipstack.treasuretrail.africa/uploads/screenshots/${req.params.id}.jpg`;
         }
 
-        const result = await apps.updateOne({ app_id: req.params.id, developerId: req.user.id }, { $set: updateFields });
-        if (result.matchedCount === 0) return res.status(404).json({ error: 'App not found' });
+        if (Object.keys(updateFields).length > 0) {
+            const result = await apps.updateOne({ app_id: req.params.id, developerId: req.user.id }, { $set: updateFields });
+            if (result.matchedCount === 0) return res.status(404).json({ error: 'App not found' });
+        }
+        
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'Failed to update app' }); }
+    } catch (err) { 
+        console.error(err);
+        res.status(500).json({ error: 'Failed to update app' }); 
+    }
 });
 
 app.delete('/api/apps/:id', authenticateToken, async (req, res) => {
@@ -351,10 +367,7 @@ app.post('/api/dev/simulate-purchase', authenticateToken, async (req, res) => {
         await transactions.insertOne({ developerId: req.user.id, app_id, app_name: appRecord.name, user_id, amount: 0, reference: 'DEV_TEST_' + Date.now(), email: req.user.email || 'dev@test.com', status: 'test_successful', date: new Date() });
 
         res.json({ success: true, message: 'Test purchase simulated' });
-    } catch (err) { 
-        console.error('Simulation Error:', err);
-        res.status(500).json({ error: err.message || 'Failed to simulate purchase' }); 
-    }
+    } catch (err) { res.status(500).json({ error: err.message || 'Failed to simulate purchase' }); }
 });
 
 // WEBHOOK & SINGLE ENTITLEMENT
