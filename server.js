@@ -12,6 +12,9 @@ const fs = require('fs');
 const sharp = require('sharp');
 require('dotenv').config();
 
+// Import new splash routes
+const splashRoutes = require('./routes/splash');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -31,8 +34,9 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
+// UPDATED CORS WHITELIST
 app.use(cors({
-    origin: ['https://flipstack.treasuretrail.africa', 'https://www.flipstack.treasuretrail.africa'],
+    origin: ['https://flipstack.store', 'https://www.flipstack.store'],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
@@ -49,11 +53,34 @@ async function startServer() {
         await client.connect();
         db = client.db('flipstack');
         entitlements = db.collection('entitlements');
-        apps = db.collection('apps'); 
+        apps = db.collection('apps');
         developers = db.collection('developers');
-        transactions = db.collection('transactions'); 
-        app.listen(PORT, () => console.log(`🚀 FlipStack listening on port ${PORT}`));
-    } catch (err) { console.error('❌ Failed to connect to MongoDB', err); }
+        transactions = db.collection('transactions');
+        
+        // Mount Splash Routes
+        app.use('/api/splash', splashRoutes(db));
+
+        // Mount Sitemap Route (SEO)
+        app.get('/sitemap.xml', async (req, res) => {
+            try {
+                const allApps = await apps.find({}).toArray();
+                let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
+                xml += `    <url>\n        <loc>https://flipstack.store/</loc>\n        <changefreq>daily</changefreq>\n        <priority>1.0</priority>\n    </url>\n`;
+
+                allApps.forEach(app => {
+                    xml += `    <url>\n        <loc>https://flipstack.store/?app=${app.app_id}</loc>\n        <changefreq>weekly</changefreq>\n        <priority>0.8</priority>\n    </url>\n`;
+                });
+
+                xml += `</urlset>`;
+                res.header('Content-Type', 'application/xml');
+                res.send(xml);
+            } catch (error) {
+                res.status(500).send('Error generating sitemap');
+            }
+        });
+
+        app.listen(PORT, () => console.log(`FlipStack listening on port ${PORT}`));
+    } catch (err) { console.error('Failed to connect to MongoDB', err); }
 }
 
 const authenticateToken = (req, res, next) => {
@@ -158,23 +185,25 @@ app.get('/api/apps', authenticateToken, async (req, res) => {
         const myApps = await apps.find({ developerId: req.user.id }).toArray();
         const safeApps = myApps.map(app => ({
             id: app._id, app_id: app.app_id, name: app.name,
-            webhook_url: `https://api.flipstack.treasuretrail.africa/webhook/${app.app_id}`,
+            webhook_url: `https://api.flipstack.store/webhook/${app.app_id}`,
             category: app.category, description: app.description, price: app.price,
             icon_url: app.icon_url || '', screenshot_url: app.screenshot_url || '',
-            aspect_ratio: app.aspect_ratio, app_url: app.app_url || '', created_at: app.created_at
+            aspect_ratio: app.aspect_ratio, app_url: app.app_url || '', created_at: app.created_at,
+            splash_paid: app.splash_paid || false,
+            splash_status: app.splash_status || 'none',
+            splash_video_url: app.splash_video_url || ''
         }));
         res.json({ apps: safeApps });
     } catch (err) { res.status(500).json({ error: 'Failed to fetch apps' }); }
 });
 
 app.post('/api/apps', authenticateToken, upload.fields([
-    { name: 'apk_file', maxCount: 1 }, 
+    { name: 'apk_file', maxCount: 1 },
     { name: 'icon_file', maxCount: 1 },
     { name: 'screenshot_file', maxCount: 1 }
 ]), async (req, res) => {
     const { name, category, description, price, aspect_ratio } = req.body;
     if (!name) return res.status(400).json({ error: 'App name required' });
-    
     const baseSlug = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
     const randomSuffix = crypto.randomBytes(2).toString('hex');
     const app_id = `${baseSlug}-${randomSuffix}`;
@@ -188,22 +217,21 @@ app.post('/api/apps', authenticateToken, upload.fields([
             const apkFile = req.files['apk_file'][0];
             const finalApkPath = path.join(apkDir, `${app_id}.apk`);
             fs.renameSync(apkFile.path, finalApkPath);
-            app_url = `https://flipstack.treasuretrail.africa/uploads/apks/${app_id}.apk`;
+            app_url = `https://flipstack.store/uploads/apks/${app_id}.apk`;
         }
 
         if (req.files && req.files['icon_file']) {
             const iconFile = req.files['icon_file'][0];
             const finalIconPath = path.join(iconDir, `${app_id}.png`);
-            
-            // OPTION 1: SAFE ZONE PADDING
+
             await sharp(iconFile.path)
                 .resize(460, 460, { fit: 'inside', withoutEnlargement: true })
                 .extend({ top: 26, bottom: 26, left: 26, right: 26, background: { r: 15, g: 15, b: 19, alpha: 1 } })
                 .png()
                 .toFile(finalIconPath);
-                
+
             fs.unlinkSync(iconFile.path);
-            icon_url = `https://flipstack.treasuretrail.africa/uploads/icons/${app_id}.png`;
+            icon_url = `https://flipstack.store/uploads/icons/${app_id}.png`;
         }
 
         if (req.files && req.files['screenshot_file']) {
@@ -211,54 +239,52 @@ app.post('/api/apps', authenticateToken, upload.fields([
             const finalSsPath = path.join(screenshotDir, `${app_id}.jpg`);
             await sharp(ssFile.path).resize(1080, 2400, { fit: 'cover' }).jpeg({ quality: 80 }).toFile(finalSsPath);
             fs.unlinkSync(ssFile.path);
-            screenshot_url = `https://flipstack.treasuretrail.africa/uploads/screenshots/${app_id}.jpg`;
+            screenshot_url = `https://flipstack.store/uploads/screenshots/${app_id}.jpg`;
         }
 
-        const newApp = { 
-            developerId: req.user.id, app_id, name, 
-            category: category || 'Utilities', 
-            description: description || 'No description.', 
-            price: price || 0, 
-            icon_url: icon_url, 
+        const newApp = {
+            developerId: req.user.id, app_id, name,
+            category: category || 'Utilities',
+            description: description || 'No description.',
+            price: price || 0,
+            icon_url: icon_url,
             screenshot_url: screenshot_url,
-            aspect_ratio: aspect_ratio || '9 / 20', 
-            app_url: app_url, 
-            created_at: new Date() 
+            aspect_ratio: aspect_ratio || '9 / 20',
+            app_url: app_url,
+            created_at: new Date()
         };
         await apps.insertOne(newApp);
         res.status(201).json({ success: true, app_id });
-    } catch (err) { 
+    } catch (err) {
         console.error(err);
-        res.status(500).json({ error: 'Failed to register app' }); 
+        res.status(500).json({ error: 'Failed to register app' });
     }
 });
 
 app.put('/api/apps/:id', authenticateToken, upload.fields([
-    { name: 'apk_file', maxCount: 1 }, 
+    { name: 'apk_file', maxCount: 1 },
     { name: 'icon_file', maxCount: 1 },
     { name: 'screenshot_file', maxCount: 1 }
 ]), async (req, res) => {
     let updateFields = {};
-    
     if (req.body.name !== undefined) updateFields.name = req.body.name;
     if (req.body.category !== undefined) updateFields.category = req.body.category;
     if (req.body.description !== undefined) updateFields.description = req.body.description;
     if (req.body.price !== undefined) updateFields.price = Number(req.body.price);
     if (req.body.aspect_ratio !== undefined) updateFields.aspect_ratio = req.body.aspect_ratio;
-    
+
     try {
         if (req.files && req.files['apk_file']) {
             const apkFile = req.files['apk_file'][0];
             const finalApkPath = path.join(apkDir, `${req.params.id}.apk`);
             fs.renameSync(apkFile.path, finalApkPath);
-            updateFields.app_url = `https://flipstack.treasuretrail.africa/uploads/apks/${req.params.id}.apk`;
+            updateFields.app_url = `https://flipstack.store/uploads/apks/${req.params.id}.apk`;
         }
 
         if (req.files && req.files['icon_file']) {
             const iconFile = req.files['icon_file'][0];
             const finalIconPath = path.join(iconDir, `${req.params.id}.png`);
-            
-            // OPTION 1: SAFE ZONE PADDING
+
             await sharp(iconFile.path)
                 .resize(460, 460, { fit: 'inside', withoutEnlargement: true })
                 .extend({ top: 26, bottom: 26, left: 26, right: 26, background: { r: 15, g: 15, b: 19, alpha: 1 } })
@@ -266,7 +292,7 @@ app.put('/api/apps/:id', authenticateToken, upload.fields([
                 .toFile(finalIconPath);
 
             fs.unlinkSync(iconFile.path);
-            updateFields.icon_url = `https://flipstack.treasuretrail.africa/uploads/icons/${req.params.id}.png`;
+            updateFields.icon_url = `https://flipstack.store/uploads/icons/${req.params.id}.png`;
         }
 
         if (req.files && req.files['screenshot_file']) {
@@ -274,18 +300,18 @@ app.put('/api/apps/:id', authenticateToken, upload.fields([
             const finalSsPath = path.join(screenshotDir, `${req.params.id}.jpg`);
             await sharp(ssFile.path).resize(1080, 2400, { fit: 'cover' }).jpeg({ quality: 80 }).toFile(finalSsPath);
             fs.unlinkSync(ssFile.path);
-            updateFields.screenshot_url = `https://flipstack.treasuretrail.africa/uploads/screenshots/${req.params.id}.jpg`;
+            updateFields.screenshot_url = `https://flipstack.store/uploads/screenshots/${req.params.id}.jpg`;
         }
 
         if (Object.keys(updateFields).length > 0) {
             const result = await apps.updateOne({ app_id: req.params.id, developerId: req.user.id }, { $set: updateFields });
             if (result.matchedCount === 0) return res.status(404).json({ error: 'App not found' });
         }
-        
+
         res.json({ success: true });
-    } catch (err) { 
+    } catch (err) {
         console.error(err);
-        res.status(500).json({ error: 'Failed to update app' }); 
+        res.status(500).json({ error: 'Failed to update app' });
     }
 });
 
@@ -312,14 +338,15 @@ app.get('/api/storefront/apps', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
-    
     try {
         const allApps = await apps.find({}).toArray();
         const publicApps = allApps.map(app => ({
-            app_id: app.app_id, name: app.name, category: app.category || 'App', 
-            description: app.description || '', price: app.price || 0, 
+            app_id: app.app_id, name: app.name, category: app.category || 'App',
+            description: app.description || '', price: app.price || 0,
             icon_url: app.icon_url || '', screenshot_url: app.screenshot_url || '',
-            aspect_ratio: app.aspect_ratio || '9 / 20', app_url: app.app_url || ''
+            aspect_ratio: app.aspect_ratio || '9 / 20', app_url: app.app_url || '',
+            splash_video_url: app.splash_video_url || '',
+            splash_status: app.splash_status || 'none'
         }));
         res.json({ apps: publicApps });
     } catch (err) { res.status(500).json({ error: 'Failed to load storefront apps' }); }
@@ -358,7 +385,7 @@ app.post('/api/entitlement/batch', async (req, res) => {
 app.post('/api/dev/simulate-purchase', authenticateToken, async (req, res) => {
     const { app_id, user_id } = req.body;
     if (!app_id || !user_id) return res.status(400).json({ error: 'Missing app_id or user_id' });
-    
+
     try {
         const appRecord = await apps.findOne({ app_id, developerId: req.user.id });
         if (!appRecord) return res.status(404).json({ error: 'App not found or unauthorized' });
@@ -386,11 +413,11 @@ app.post('/webhook/:app_id', async (req, res) => {
     const event = req.body;
     if (event.event === 'charge.success') {
         const userId = event.data.metadata?.user_id;
-        const amount = event.data.amount / 100; 
+        const amount = event.data.amount / 100;
         if (userId) {
             await entitlements.updateOne({ app_id: req.params.app_id, user_id: userId }, { $set: { tier: 'pro', updated_at: new Date() } }, { upsert: true });
             await transactions.insertOne({ developerId: developer.developerId, app_id: req.params.app_id, app_name: developer.name, user_id: userId, amount, reference: event.data.reference, email: event.data.customer.email, status: 'successful', date: new Date() });
-            console.log(`✅ [${developer.name}] Flipped User ${userId} to PRO and logged R${amount}`);
+            console.log(`[${developer.name}] Flipped User ${userId} to PRO and logged R${amount}`);
         }
     }
     res.status(200).send('Webhook received');
