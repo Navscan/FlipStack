@@ -177,9 +177,7 @@ app.put('/api/dev/keys', authenticateToken, async (req, res) => {
     const { public_key, secret_key } = req.body;
     try {
         const updateFields = { paystack_public_key: public_key };
-        if (secret_key && secret_key.trim() !== '') {
-            updateFields.paystack_secret_key = encrypt(secret_key);
-        }
+        if (secret_key && secret_key.trim() !== '') updateFields.paystack_secret_key = encrypt(secret_key);
         await developers.updateOne({ _id: new ObjectId(req.user.id) }, { $set: updateFields });
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
@@ -243,7 +241,9 @@ app.get('/api/apps', authenticateToken, async (req, res) => {
             category: app.category, description: app.description, price: app.price,
             icon_url: app.icon_url || '', screenshot_url: app.screenshot_url || '',
             aspect_ratio: app.aspect_ratio, app_url: app.app_url || '', created_at: app.created_at,
-            splash_paid: app.splash_paid || false, splash_status: app.splash_status || 'none', splash_video_url: app.splash_video_url || ''
+            splash_paid: app.splash_paid || false, splash_status: app.splash_status || 'none', 
+            splash_video_url: app.splash_video_url || '',
+            splash_video_url_b: app.splash_video_url_b || '' // Send Video B to dashboard
         }));
         res.json({ apps: safeApps });
     } catch (err) { res.status(500).json({ error: 'Failed to fetch apps' }); }
@@ -351,18 +351,27 @@ app.get('/api/dev/payouts', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'Failed to fetch payouts' }); }
 });
 
-// --- ANALYTICS ENGINE ---
+// --- ANALYTICS ENGINE (UPDATED FOR A/B) ---
 app.post('/api/analytics/track', async (req, res) => {
-    const { app_id } = req.body;
+    const { app_id, variant } = req.body;
     if (!app_id) return res.status(400).send();
     try {
         const appRecord = await apps.findOne({ app_id });
         if (!appRecord) return res.status(404).send();
         
         const date = new Date().toISOString().split('T')[0];
+        
+        // Define what to increment based on the variant
+        let incField = { count: 1 }; // Default view count
+        if (variant === 'A') incField['variant_a_clicks'] = 1;
+        if (variant === 'B') incField['variant_b_clicks'] = 1;
+
         await analytics_views.updateOne(
             { app_id, date },
-            { $inc: { count: 1 }, $setOnInsert: { developerId: appRecord.developerId } },
+            { 
+                $inc: incField, 
+                $setOnInsert: { developerId: appRecord.developerId, count: 0, variant_a_clicks: 0, variant_b_clicks: 0 } 
+            },
             { upsert: true }
         );
         res.status(200).send();
@@ -376,7 +385,11 @@ app.get('/api/dev/analytics', authenticateToken, async (req, res) => {
         const totalSales = txs.length;
         const totalRevenue = txs.reduce((sum, tx) => sum + tx.amount, 0);
         const views = await analytics_views.find({ developerId: devId }).toArray();
-        const totalViews = views.reduce((sum, v) => sum + v.count, 0);
+        
+        const totalViews = views.reduce((sum, v) => sum + (v.count || 0), 0);
+        const totalVariantA = views.reduce((sum, v) => sum + (v.variant_a_clicks || 0), 0);
+        const totalVariantB = views.reduce((sum, v) => sum + (v.variant_b_clicks || 0), 0);
+
         const conversionRate = totalViews === 0 ? 0 : ((totalSales / totalViews) * 100).toFixed(2);
 
         const last7Days = [];
@@ -384,12 +397,11 @@ app.get('/api/dev/analytics', authenticateToken, async (req, res) => {
             const d = new Date();
             d.setDate(d.getDate() - i);
             const dateStr = d.toISOString().split('T')[0];
-            const dayViews = views.filter(v => v.date === dateStr).reduce((sum, v) => sum + v.count, 0);
-            const daySales = txs.filter(tx => new Date(tx.date).toISOString().split('T')[0] === dateStr).length;
-            last7Days.push({ date: dateStr, views: dayViews, sales: daySales });
+            const dayViews = views.filter(v => v.date === dateStr).reduce((sum, v) => sum + (v.count || 0), 0);
+            last7Days.push({ date: dateStr, views: dayViews });
         }
 
-        res.json({ totalViews, totalSales, totalRevenue, conversionRate, last7Days });
+        res.json({ totalViews, totalSales, totalRevenue, conversionRate, last7Days, totalVariantA, totalVariantB });
     } catch (err) { res.status(500).json({ error: 'Analytics error' }); }
 });
 
@@ -401,7 +413,9 @@ app.get('/api/storefront/apps', async (req, res) => {
         const publicApps = allApps.map(app => ({
             app_id: app.app_id, name: app.name, category: app.category || 'App', description: app.description || '', price: app.price || 0,
             icon_url: app.icon_url || '', screenshot_url: app.screenshot_url || '', aspect_ratio: app.aspect_ratio || '9 / 20', app_url: app.app_url || '',
-            splash_video_url: app.splash_video_url || '', splash_status: app.splash_status || 'none'
+            splash_video_url: app.splash_video_url || '', 
+            splash_video_url_b: app.splash_video_url_b || '', // Return Video B
+            splash_status: app.splash_status || 'none'
         }));
         res.json({ apps: publicApps });
     } catch (err) { res.status(500).json({ error: 'Failed to load storefront apps' }); }
@@ -413,7 +427,6 @@ app.get('/api/storefront/app/:app_id', async (req, res) => {
         const appRecord = await apps.findOne({ app_id: req.params.app_id });
         if (!appRecord) return res.status(404).json({ error: 'App not found' });
         
-        // FETCH DEVELOPER NAME
         const dev = await developers.findOne({ _id: new ObjectId(appRecord.developerId) });
         const devName = dev ? dev.name : 'Indie Developer';
 
@@ -421,7 +434,9 @@ app.get('/api/storefront/app/:app_id', async (req, res) => {
             app: {
                 app_id: appRecord.app_id, name: appRecord.name, category: appRecord.category || 'App', description: appRecord.description || '', price: appRecord.price || 0,
                 icon_url: appRecord.icon_url || '', screenshot_url: appRecord.screenshot_url || '', aspect_ratio: appRecord.aspect_ratio || '9 / 20', app_url: appRecord.app_url || '',
-                splash_video_url: appRecord.splash_video_url || '', splash_status: appRecord.splash_status || 'none', created_at: appRecord.created_at,
+                splash_video_url: appRecord.splash_video_url || '', 
+                splash_video_url_b: appRecord.splash_video_url_b || '',
+                splash_status: appRecord.splash_status || 'none', created_at: appRecord.created_at,
                 developer_name: devName
             }
         });
@@ -436,25 +451,18 @@ app.post('/api/checkout/initiate', async (req, res) => {
         if (!appRecord || appRecord.price <= 0) return res.status(400).json({ error: 'Invalid app or price is 0' });
         
         const dev = await developers.findOne({ _id: new ObjectId(appRecord.developerId) });
-        const encryptedKey = dev?.paystack_secret_key || appRecord.paystack_secret;
-        const secretKey = decrypt(encryptedKey);
+        const secretKey = decrypt(dev?.paystack_secret_key || appRecord.paystack_secret);
         
-        // EXTRA VALIDATION: Check if decryption worked and returned a real key
         if (!secretKey || !secretKey.startsWith('sk_')) {
-            console.error('Checkout Error: Invalid or missing Paystack Secret Key for dev', dev?.email);
             return res.status(400).json({ error: 'Developer Paystack key is missing or invalid. Please contact the developer.' });
         }
 
         const payload = { email, amount: appRecord.price, metadata: { app_id, user_id, custom_fields: [{ display_name: "App Name", variable_name: "app_name", value: appRecord.name }] } };
-        
         const paystackResponse = await axios.post('https://api.paystack.co/transaction/initialize', payload, { headers: { Authorization: `Bearer ${secretKey}` } });
-        
         res.json({ success: true, access_code: paystackResponse.data.data.access_code });
         
     } catch (err) { 
-        // LOG THE EXACT PAYSTACK ERROR
         const paystackError = err.response?.data?.message || err.message;
-        console.error('Paystack Checkout Failed:', paystackError);
         res.status(500).json({ error: `Payment Gateway Error: ${paystackError}` }); 
     }
 });
