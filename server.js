@@ -234,7 +234,7 @@ app.get('/api/dev/export-csv', authenticateToken, async (req, res) => {
 // APP MANAGEMENT
 app.get('/api/apps', authenticateToken, async (req, res) => {
     try {
-        const myApps = await apps.find({ developerId: req.user.id }).toArray();
+        const myApps = await apps.find({ developerId: req.user.id }).sort({ created_at: -1 }).toArray();
         const safeApps = myApps.map(app => ({
             id: app._id, app_id: app.app_id, name: app.name,
             webhook_url: `https://api.flipstack.store/webhook/${app.app_id}`,
@@ -243,7 +243,7 @@ app.get('/api/apps', authenticateToken, async (req, res) => {
             aspect_ratio: app.aspect_ratio, app_url: app.app_url || '', created_at: app.created_at,
             splash_paid: app.splash_paid || false, splash_status: app.splash_status || 'none', 
             splash_video_url: app.splash_video_url || '',
-            splash_video_url_b: app.splash_video_url_b || '' // Send Video B to dashboard
+            splash_video_url_b: app.splash_video_url_b || ''
         }));
         res.json({ apps: safeApps });
     } catch (err) { res.status(500).json({ error: 'Failed to fetch apps' }); }
@@ -351,7 +351,7 @@ app.get('/api/dev/payouts', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'Failed to fetch payouts' }); }
 });
 
-// --- ANALYTICS ENGINE (UPDATED FOR A/B) ---
+// --- ANALYTICS ENGINE ---
 app.post('/api/analytics/track', async (req, res) => {
     const { app_id, variant } = req.body;
     if (!app_id) return res.status(400).send();
@@ -361,8 +361,7 @@ app.post('/api/analytics/track', async (req, res) => {
         
         const date = new Date().toISOString().split('T')[0];
         
-        // Define what to increment based on the variant
-        let incField = { count: 1 }; // Default view count
+        let incField = { count: 1 };
         if (variant === 'A') incField['variant_a_clicks'] = 1;
         if (variant === 'B') incField['variant_b_clicks'] = 1;
 
@@ -405,16 +404,34 @@ app.get('/api/dev/analytics', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'Analytics error' }); }
 });
 
-// STOREFRONT API
+// STOREFRONT API (Sorted by Category Strip Order)
 app.get('/api/storefront/apps', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
         const allApps = await apps.find({}).toArray();
+        
+        // Define the exact order of the strip menu
+        const categoryWeights = {
+            "Games": 1, "Education": 2, "Music": 3, "Utilities": 4, 
+            "Productivity": 5, "Calculators": 6, "Tools": 7, 
+            "Photography": 8, "Health": 9, "Finance": 10, 
+            "Developer Tools": 11, "Creative & Design": 12, 
+            "Lifestyle & Wellness": 13, "Social & Niche": 14
+        };
+
+        // Sort by category weight, falling back to newest first if categories match
+        allApps.sort((a, b) => {
+            const weightA = categoryWeights[a.category] || 999;
+            const weightB = categoryWeights[b.category] || 999;
+            if (weightA !== weightB) return weightA - weightB;
+            return new Date(b.created_at) - new Date(a.created_at);
+        });
+
         const publicApps = allApps.map(app => ({
             app_id: app.app_id, name: app.name, category: app.category || 'App', description: app.description || '', price: app.price || 0,
             icon_url: app.icon_url || '', screenshot_url: app.screenshot_url || '', aspect_ratio: app.aspect_ratio || '9 / 20', app_url: app.app_url || '',
             splash_video_url: app.splash_video_url || '', 
-            splash_video_url_b: app.splash_video_url_b || '', // Return Video B
+            splash_video_url_b: app.splash_video_url_b || '', 
             splash_status: app.splash_status || 'none'
         }));
         res.json({ apps: publicApps });
