@@ -1,10 +1,6 @@
 <div align="center">
 
-<img src="https://flipstack.store/icon-192.png" width="60" height="60" align="center" />
-
-<h1>
-  <span style="color: #FF3399;">Flip</span><span style="color: #00C9A7;">Stack</span>
-</h1>
+<img src="https://flipstack.store/uploads/logo.svg" width="400" align="center" />
 
 **The Indie App Store.** 
 
