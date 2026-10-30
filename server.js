@@ -203,13 +203,61 @@ app.put('/api/dev/password', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
-app.post('/api/dev/upgrade-tier', authenticateToken, async (req, res) => {
+// SaaS BILLING ROUTES
+app.post('/api/dev/initiate-upgrade', authenticateToken, async (req, res) => {
     const { tier } = req.body;
-    if (!['free', 'pro', 'studio'].includes(tier)) return res.status(400).json({ error: 'Invalid tier' });
+    if (!['pro', 'studio'].includes(tier)) return res.status(400).json({ error: 'Invalid tier' });
+    
+    const amount = tier === 'pro' ? 14900 : 39900; // R149 or R399 in cents
+    const secretKey = process.env.FLIPSTACK_PAYSTACK_SECRET;
+    
+    if (!secretKey) return res.status(500).json({ error: 'FlipStack Paystack secret key not configured on server.' });
+
     try {
-        await developers.updateOne({ _id: new ObjectId(req.user.id) }, { $set: { tier: tier } });
-        res.json({ success: true, message: `Upgraded to ${tier}` });
+        const dev = await developers.findOne({ _id: new ObjectId(req.user.id) });
+        const payload = {
+            email: dev.email,
+            amount: amount,
+            metadata: { developerId: req.user.id, tier: tier, type: 'saas_upgrade' },
+            callback_url: 'https://flipstack.store/dashboard.html?upgrade=success'
+        };
+        
+        const paystackResponse = await axios.post('https://api.paystack.co/transaction/initialize', payload, { 
+            headers: { Authorization: `Bearer ${secretKey}` } 
+        });
+        
+        res.json({ success: true, authorization_url: paystackResponse.data.data.authorization_url });
+    } catch (err) {
+        const paystackError = err.response?.data?.message || err.message;
+        res.status(500).json({ error: `Billing Error: ${paystackError}` });
+    }
+});
+
+app.post('/api/dev/downgrade-tier', authenticateToken, async (req, res) => {
+    try {
+        await developers.updateOne({ _id: new ObjectId(req.user.id) }, { $set: { tier: 'free' } });
+        res.json({ success: true, message: 'Downgraded to free' });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+app.post('/api/webhooks/flipstack', async (req, res) => {
+    const signature = req.headers['x-paystack-signature'];
+    const secretKey = process.env.FLIPSTACK_PAYSTACK_SECRET;
+    if (!signature || !secretKey) return res.status(400).send('No signature or key configured');
+    
+    const expectedSignature = crypto.createHmac('sha512', secretKey).update(req.rawBody).digest('hex');
+    if (signature !== expectedSignature) return res.status(401).send('Invalid signature');
+
+    const event = req.body;
+    if (event.event === 'charge.success') {
+        const metadata = event.data.metadata;
+        if (metadata && metadata.type === 'saas_upgrade') {
+            const { developerId, tier } = metadata;
+            await developers.updateOne({ _id: new ObjectId(developerId) }, { $set: { tier: tier } });
+            console.log(`[SaaS Upgrade] Developer ${developerId} successfully upgraded to ${tier}`);
+        }
+    }
+    res.status(200).send('Webhook received');
 });
 
 app.get('/api/dev/export-csv', authenticateToken, async (req, res) => {
@@ -410,7 +458,6 @@ app.get('/api/storefront/apps', async (req, res) => {
     try {
         const allApps = await apps.find({}).toArray();
         
-        // Define the exact order of the strip menu
         const categoryWeights = {
             "Games": 1, "Education": 2, "Music": 3, "Utilities": 4, 
             "Productivity": 5, "Calculators": 6, "Tools": 7, 
@@ -419,7 +466,6 @@ app.get('/api/storefront/apps', async (req, res) => {
             "Lifestyle & Wellness": 13, "Social & Niche": 14
         };
 
-        // Sort by category weight, falling back to newest first if categories match
         allApps.sort((a, b) => {
             const weightA = categoryWeights[a.category] || 999;
             const weightB = categoryWeights[b.category] || 999;
