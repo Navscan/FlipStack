@@ -88,7 +88,7 @@ async function startServer() {
 
         app.get('/sitemap.xml', async (req, res) => {
             try {
-                const allApps = await apps.find({}).toArray();
+                const allApps = await apps.find({ is_archived: { $ne: true } }).toArray();
                 let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
                 xml += `    <url>\n        <loc>https://flipstack.store/</loc>\n        <changefreq>daily</changefreq>\n        <priority>1.0</priority>\n    </url>\n`;
                 allApps.forEach(app => {
@@ -208,7 +208,7 @@ app.post('/api/dev/initiate-upgrade', authenticateToken, async (req, res) => {
     const { tier } = req.body;
     if (!['pro', 'studio'].includes(tier)) return res.status(400).json({ error: 'Invalid tier' });
     
-    const amount = tier === 'pro' ? 14900 : 39900; // R149 or R399 in cents
+    const amount = tier === 'pro' ? 14900 : 39900; 
     const secretKey = process.env.FLIPSTACK_PAYSTACK_SECRET;
     
     if (!secretKey) return res.status(500).json({ error: 'FlipStack Paystack secret key not configured on server.' });
@@ -282,7 +282,7 @@ app.get('/api/dev/export-csv', authenticateToken, async (req, res) => {
 // APP MANAGEMENT
 app.get('/api/apps', authenticateToken, async (req, res) => {
     try {
-        const myApps = await apps.find({ developerId: req.user.id }).sort({ created_at: -1 }).toArray();
+        const myApps = await apps.find({ developerId: req.user.id }).sort({ is_archived: 1, created_at: -1 }).toArray();
         const safeApps = myApps.map(app => ({
             id: app._id, app_id: app.app_id, name: app.name,
             webhook_url: `https://api.flipstack.store/webhook/${app.app_id}`,
@@ -291,7 +291,8 @@ app.get('/api/apps', authenticateToken, async (req, res) => {
             aspect_ratio: app.aspect_ratio, app_url: app.app_url || '', created_at: app.created_at,
             splash_paid: app.splash_paid || false, splash_status: app.splash_status || 'none', 
             splash_video_url: app.splash_video_url || '',
-            splash_video_url_b: app.splash_video_url_b || ''
+            splash_video_url_b: app.splash_video_url_b || '',
+            is_archived: app.is_archived || false
         }));
         res.json({ apps: safeApps });
     } catch (err) { res.status(500).json({ error: 'Failed to fetch apps' }); }
@@ -305,10 +306,12 @@ app.post('/api/apps', authenticateToken, upload.fields([
     try {
         const dev = await developers.findOne({ _id: new ObjectId(req.user.id) });
         const devTier = dev.tier || 'free';
-        const appCount = await apps.countDocuments({ developerId: req.user.id });
-        if (devTier === 'free' && appCount >= 1) return res.status(403).json({ error: 'Free tier limit reached (1 App).' });
-        if (devTier === 'pro' && appCount >= 3) return res.status(403).json({ error: 'Pro tier limit reached (3 Apps).' });
-        if (devTier === 'studio' && appCount >= 10) return res.status(403).json({ error: 'Studio tier limit reached (10 Apps).' });
+        
+        const appCount = await apps.countDocuments({ developerId: req.user.id, is_archived: { $ne: true } });
+        
+        if (devTier === 'free' && appCount >= 1) return res.status(403).json({ error: 'Free tier limit reached (1 Active App). Archive an old app or upgrade to Pro.' });
+        if (devTier === 'pro' && appCount >= 3) return res.status(403).json({ error: 'Pro tier limit reached (3 Active Apps). Archive an old app or upgrade to Studio.' });
+        if (devTier === 'studio' && appCount >= 10) return res.status(403).json({ error: 'Studio tier limit reached (10 Active Apps). Archive an old app.' });
 
         const baseSlug = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
         const randomSuffix = crypto.randomBytes(2).toString('hex');
@@ -337,11 +340,35 @@ app.post('/api/apps', authenticateToken, upload.fields([
 
         const newApp = {
             developerId: req.user.id, app_id, name, category: category || 'Utilities', description: description || 'No description.',
-            price: price || 0, icon_url: icon_url, screenshot_url: screenshot_url, aspect_ratio: aspect_ratio || '9 / 20', app_url: app_url, created_at: new Date()
+            price: price || 0, icon_url: icon_url, screenshot_url: screenshot_url, aspect_ratio: aspect_ratio || '9 / 20', app_url: app_url, created_at: new Date(),
+            is_archived: false
         };
         await apps.insertOne(newApp);
         res.status(201).json({ success: true, app_id });
     } catch (err) { res.status(500).json({ error: 'Failed to register app' }); }
+});
+
+app.put('/api/apps/:id/archive', authenticateToken, async (req, res) => {
+    try {
+        const appRecord = await apps.findOne({ app_id: req.params.id, developerId: req.user.id });
+        if (!appRecord) return res.status(404).json({ error: 'App not found' });
+
+        const newArchivedState = !appRecord.is_archived;
+
+        if (!newArchivedState) {
+            const dev = await developers.findOne({ _id: new ObjectId(req.user.id) });
+            const devTier = dev.tier || 'free';
+            const activeCount = await apps.countDocuments({ developerId: req.user.id, is_archived: { $ne: true } });
+            const limit = devTier === 'free' ? 1 : devTier === 'pro' ? 3 : 10;
+            
+            if (activeCount >= limit) {
+                return res.status(403).json({ error: 'Active app limit reached. Upgrade your tier or archive another app to unarchive this one.' });
+            }
+        }
+
+        await apps.updateOne({ app_id: req.params.id }, { $set: { is_archived: newArchivedState } });
+        res.json({ success: true, is_archived: newArchivedState });
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.put('/api/apps/:id', authenticateToken, upload.fields([
@@ -456,7 +483,7 @@ app.get('/api/dev/analytics', authenticateToken, async (req, res) => {
 app.get('/api/storefront/apps', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
-        const allApps = await apps.find({}).toArray();
+        const allApps = await apps.find({ is_archived: { $ne: true } }).toArray();
         
         const categoryWeights = {
             "Games": 1, "Education": 2, "Music": 3, "Utilities": 4, 
@@ -489,6 +516,7 @@ app.get('/api/storefront/app/:app_id', async (req, res) => {
     try {
         const appRecord = await apps.findOne({ app_id: req.params.app_id });
         if (!appRecord) return res.status(404).json({ error: 'App not found' });
+        if (appRecord.is_archived) return res.status(404).json({ error: 'App has been archived by the developer.' });
         
         const dev = await developers.findOne({ _id: new ObjectId(appRecord.developerId) });
         const devName = dev ? dev.name : 'Indie Developer';
@@ -512,6 +540,7 @@ app.post('/api/checkout/initiate', async (req, res) => {
     try {
         const appRecord = await apps.findOne({ app_id });
         if (!appRecord || appRecord.price <= 0) return res.status(400).json({ error: 'Invalid app or price is 0' });
+        if (appRecord.is_archived) return res.status(400).json({ error: 'This app has been archived and is no longer accepting payments.' });
         
         const dev = await developers.findOne({ _id: new ObjectId(appRecord.developerId) });
         const secretKey = decrypt(dev?.paystack_secret_key || appRecord.paystack_secret);
