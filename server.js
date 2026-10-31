@@ -18,8 +18,6 @@ const { encrypt, decrypt } = require('./lib/crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// --- RESERVED FEATURE FLAG ---
-// Set to true when you are ready to launch custom domains and have configured Nginx/SSL.
 const CUSTOM_DOMAINS_ENABLED = false; 
 
 const apkDir = '/var/www/flipstack-frontend/uploads/apks';
@@ -36,7 +34,12 @@ const storage = multer.diskStorage({
         cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
     }
 });
-const upload = multer({ storage: storage });
+
+// ADDED: 100MB Limit to protect VPS bandwidth and disk
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+});
 
 app.use(cors({
     origin: ['https://flipstack.store', 'https://www.flipstack.store'],
@@ -220,7 +223,6 @@ app.put('/api/dev/custom-domain', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: 'Custom Domains are exclusive to Studio tier.' });
         }
 
-        // Basic validation
         if (custom_domain && !/^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$/.test(custom_domain)) {
             return res.status(400).json({ error: 'Invalid domain format.' });
         }
@@ -372,7 +374,12 @@ app.post('/api/apps', authenticateToken, upload.fields([
         };
         await apps.insertOne(newApp);
         res.status(201).json({ success: true, app_id });
-    } catch (err) { res.status(500).json({ error: 'Failed to register app' }); }
+    } catch (err) { 
+        if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+            return res.status(413).json({ error: 'File too large. The maximum allowed size for an APK is 100MB.' });
+        }
+        res.status(500).json({ error: 'Failed to register app' }); 
+    }
 });
 
 app.put('/api/apps/:id/archive', authenticateToken, async (req, res) => {
@@ -432,7 +439,12 @@ app.put('/api/apps/:id', authenticateToken, upload.fields([
             if (result.matchedCount === 0) return res.status(404).json({ error: 'App not found' });
         }
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'Failed to update app' }); }
+    } catch (err) { 
+        if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+            return res.status(413).json({ error: 'File too large. The maximum allowed size for an APK is 100MB.' });
+        }
+        res.status(500).json({ error: 'Failed to update app' }); 
+    }
 });
 
 app.delete('/api/apps/:id', authenticateToken, async (req, res) => {
@@ -515,7 +527,6 @@ app.get('/api/storefront/apps', async (req, res) => {
         
         let query = { is_archived: { $ne: true } };
         
-        // If custom domains are enabled, and we are not on the main domain
         if (CUSTOM_DOMAINS_ENABLED && !isMainDomain) {
             const dev = await developers.findOne({ custom_domain: host });
             if (dev) {
