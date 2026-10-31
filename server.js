@@ -18,6 +18,10 @@ const { encrypt, decrypt } = require('./lib/crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// --- RESERVED FEATURE FLAG ---
+// Set to true when you are ready to launch custom domains and have configured Nginx/SSL.
+const CUSTOM_DOMAINS_ENABLED = false; 
+
 const apkDir = '/var/www/flipstack-frontend/uploads/apks';
 const iconDir = '/var/www/flipstack-frontend/uploads/icons';
 const screenshotDir = '/var/www/flipstack-frontend/uploads/screenshots';
@@ -139,7 +143,7 @@ app.post('/api/auth/login', async (req, res) => {
         const accessToken = jwt.sign({ id: dev._id.toString(), email: dev.email }, process.env.JWT_SECRET, { expiresIn: '24h' });
         const refreshToken = jwt.sign({ id: dev._id.toString() }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
         res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 7 * 24 * 60 * 60 * 1000 });
-        res.json({ accessToken, developer: { id: dev._id, email: dev.email, name: dev.name, tier: dev.tier || 'free' } });
+        res.json({ accessToken, developer: { id: dev._id, email: dev.email, name: dev.name, tier: dev.tier || 'free', custom_domain: dev.custom_domain || '' } });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -158,7 +162,7 @@ app.post('/api/auth/logout', (req, res) => { res.clearCookie('refreshToken'); re
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
     try {
         const dev = await developers.findOne({ _id: new ObjectId(req.user.id) });
-        res.json({ developer: { id: dev._id, email: dev.email, name: dev.name, tier: dev.tier || 'free', api_calls_this_month: dev.api_calls_this_month || 0 } });
+        res.json({ developer: { id: dev._id, email: dev.email, name: dev.name, tier: dev.tier || 'free', api_calls_this_month: dev.api_calls_this_month || 0, custom_domain: dev.custom_domain || '' } });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -200,6 +204,29 @@ app.put('/api/dev/password', authenticateToken, async (req, res) => {
         const hash = await bcrypt.hash(new_password, salt);
         await developers.updateOne({ _id: new ObjectId(req.user.id) }, { $set: { password: hash } });
         res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// CUSTOM DOMAIN ROUTE (RESERVED)
+app.put('/api/dev/custom-domain', authenticateToken, async (req, res) => {
+    if (!CUSTOM_DOMAINS_ENABLED) {
+        return res.status(403).json({ error: 'Custom Domains are currently in a Reserved Beta state. Please contact support.' });
+    }
+
+    const { custom_domain } = req.body;
+    try {
+        const dev = await developers.findOne({ _id: new ObjectId(req.user.id) });
+        if (dev.tier !== 'studio') {
+            return res.status(403).json({ error: 'Custom Domains are exclusive to Studio tier.' });
+        }
+
+        // Basic validation
+        if (custom_domain && !/^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$/.test(custom_domain)) {
+            return res.status(400).json({ error: 'Invalid domain format.' });
+        }
+
+        await developers.updateOne({ _id: new ObjectId(req.user.id) }, { $set: { custom_domain: custom_domain || null } });
+        res.json({ success: true, message: 'Domain updated.' });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
@@ -483,7 +510,22 @@ app.get('/api/dev/analytics', authenticateToken, async (req, res) => {
 app.get('/api/storefront/apps', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
-        const allApps = await apps.find({ is_archived: { $ne: true } }).toArray();
+        const host = req.headers.host;
+        const isMainDomain = host.includes('flipstack.store') || host.includes('154.66.198.207') || host.includes('localhost');
+        
+        let query = { is_archived: { $ne: true } };
+        
+        // If custom domains are enabled, and we are not on the main domain
+        if (CUSTOM_DOMAINS_ENABLED && !isMainDomain) {
+            const dev = await developers.findOne({ custom_domain: host });
+            if (dev) {
+                query.developerId = dev._id.toString();
+            } else {
+                return res.status(404).json({ error: 'Store not found' });
+            }
+        }
+
+        const allApps = await apps.find(query).toArray();
         
         const categoryWeights = {
             "Games": 1, "Education": 2, "Music": 3, "Utilities": 4, 
@@ -507,7 +549,7 @@ app.get('/api/storefront/apps', async (req, res) => {
             splash_video_url_b: app.splash_video_url_b || '', 
             splash_status: app.splash_status || 'none'
         }));
-        res.json({ apps: publicApps });
+        res.json({ apps: publicApps, is_custom_domain: CUSTOM_DOMAINS_ENABLED && !isMainDomain });
     } catch (err) { res.status(500).json({ error: 'Failed to load storefront apps' }); }
 });
 
