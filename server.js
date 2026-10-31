@@ -35,7 +35,6 @@ const storage = multer.diskStorage({
     }
 });
 
-// ADDED: 100MB Limit to protect VPS bandwidth and disk
 const upload = multer({ 
     storage: storage,
     limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
@@ -92,6 +91,39 @@ async function startServer() {
         analytics_views = db.collection('analytics_views');
         
         app.use('/api/splash', splashRoutes(db));
+
+        // DYNAMIC OG TAG INJECTION FOR APP PAGE
+        app.get('/app/:app_id', async (req, res, next) => {
+            try {
+                const app_id = req.params.app_id;
+                const appRecord = await apps.findOne({ app_id });
+                
+                const htmlPath = path.join('/var/www/flipstack-frontend', 'app.html');
+                let html = fs.readFileSync(htmlPath, 'utf8');
+
+                if (appRecord) {
+                    const dev = await developers.findOne({ _id: new ObjectId(appRecord.developerId) });
+                    const devName = dev ? dev.name : 'Indie Developer';
+                    const safeDesc = (appRecord.description || '').replace(/"/g, '&quot;').replace(/\n/g, ' ');
+                    const safeName = appRecord.name.replace(/"/g, '&quot;');
+                    const imageUrl = appRecord.icon_url || 'https://flipstack.store/icon-512.png';
+
+                    html = html.replace(/<title>[^<]*<\/title>/, `<title>${safeName} - FlipStack</title>`);
+                    html = html.replace(/<meta property="og:title" content="[^"]*"/, `<meta property="og:title" content="${safeName} on FlipStack"`);
+                    html = html.replace(/<meta property="og:description" content="[^"]*"/, `<meta property="og:description" content="${safeDesc}"`);
+                    html = html.replace(/<meta property="og:image" content="[^"]*"/, `<meta property="og:image" content="${imageUrl}"`);
+                    html = html.replace(/<meta property="og:url" content="[^"]*"/, `<meta property="og:url" content="https://flipstack.store/app/${app_id}"`);
+                    html = html.replace(/<meta name="twitter:title" content="[^"]*"/, `<meta name="twitter:title" content="${safeName} on FlipStack"`);
+                    html = html.replace(/<meta name="twitter:description" content="[^"]*"/, `<meta name="twitter:description" content="${safeDesc}"`);
+                    html = html.replace(/<meta name="twitter:image" content="[^"]*"/, `<meta name="twitter:image" content="${imageUrl}"`);
+                }
+
+                res.send(html);
+            } catch (err) {
+                console.error('OG Injection Error:', err);
+                res.status(500).send('Server Error');
+            }
+        });
 
         app.get('/sitemap.xml', async (req, res) => {
             try {
