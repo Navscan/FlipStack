@@ -18,7 +18,7 @@ const { encrypt, decrypt } = require('./lib/crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const CUSTOM_DOMAINS_ENABLED = false; 
+const CUSTOM_DOMAINS_ENABLED = false;
 
 const apkDir = '/var/www/flipstack-frontend/uploads/apks';
 const iconDir = '/var/www/flipstack-frontend/uploads/icons';
@@ -35,9 +35,9 @@ const storage = multer.diskStorage({
     }
 });
 
-const upload = multer({ 
+const upload = multer({
     storage: storage,
-    limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+    limits: { fileSize: 100 * 1024 * 1024 }
 });
 
 app.use(cors({
@@ -67,13 +67,12 @@ const checkApiLimit = async (req, res, next) => {
         const currentCalls = dev.api_calls_this_month || 0;
         const lastReset = dev.last_api_reset ? new Date(dev.last_api_reset) : new Date();
         const now = new Date();
-        let callsToSet = currentCalls;
 
+        let callsToSet = currentCalls;
         if (now.getMonth() !== lastReset.getMonth() || now.getFullYear() !== lastReset.getFullYear()) {
             callsToSet = 0;
             await developers.updateOne({ _id: dev._id }, { $set: { api_calls_this_month: 0, last_api_reset: now } });
         }
-
         if (callsToSet >= limit) return res.status(429).json({ error: `API Limit Reached (${limit}/mo). Upgrade to increase limits.` });
         await developers.updateOne({ _id: dev._id }, { $inc: { api_calls_this_month: 1 } });
         next();
@@ -89,15 +88,14 @@ async function startServer() {
         developers = db.collection('developers');
         transactions = db.collection('transactions');
         analytics_views = db.collection('analytics_views');
-        
+
         app.use('/api/splash', splashRoutes(db));
 
-        // DYNAMIC OG TAG INJECTION FOR APP PAGE
         app.get('/app/:app_id', async (req, res, next) => {
             try {
                 const app_id = req.params.app_id;
                 const appRecord = await apps.findOne({ app_id });
-                
+
                 const htmlPath = path.join('/var/www/flipstack-frontend', 'app.html');
                 let html = fs.readFileSync(htmlPath, 'utf8');
 
@@ -128,8 +126,10 @@ async function startServer() {
         app.get('/sitemap.xml', async (req, res) => {
             try {
                 const allApps = await apps.find({ is_archived: { $ne: true } }).toArray();
+
                 let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
                 xml += `    <url>\n        <loc>https://flipstack.store/</loc>\n        <changefreq>daily</changefreq>\n        <priority>1.0</priority>\n    </url>\n`;
+
                 allApps.forEach(app => {
                     xml += `    <url>\n        <loc>https://flipstack.store/app/${app.app_id}</loc>\n        <changefreq>weekly</changefreq>\n        <priority>0.8</priority>\n    </url>\n`;
                 });
@@ -247,18 +247,15 @@ app.put('/api/dev/custom-domain', authenticateToken, async (req, res) => {
     if (!CUSTOM_DOMAINS_ENABLED) {
         return res.status(403).json({ error: 'Custom Domains are currently in a Reserved Beta state. Please contact support.' });
     }
-
     const { custom_domain } = req.body;
     try {
         const dev = await developers.findOne({ _id: new ObjectId(req.user.id) });
         if (dev.tier !== 'studio') {
             return res.status(403).json({ error: 'Custom Domains are exclusive to Studio tier.' });
         }
-
         if (custom_domain && !/^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$/.test(custom_domain)) {
             return res.status(400).json({ error: 'Invalid domain format.' });
         }
-
         await developers.updateOne({ _id: new ObjectId(req.user.id) }, { $set: { custom_domain: custom_domain || null } });
         res.json({ success: true, message: 'Domain updated.' });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
@@ -268,10 +265,10 @@ app.put('/api/dev/custom-domain', authenticateToken, async (req, res) => {
 app.post('/api/dev/initiate-upgrade', authenticateToken, async (req, res) => {
     const { tier } = req.body;
     if (!['pro', 'studio'].includes(tier)) return res.status(400).json({ error: 'Invalid tier' });
-    
-    const amount = tier === 'pro' ? 14900 : 39900; 
+
+    const amount = tier === 'pro' ? 14900 : 39900;
     const secretKey = process.env.FLIPSTACK_PAYSTACK_SECRET;
-    
+
     if (!secretKey) return res.status(500).json({ error: 'FlipStack Paystack secret key not configured on server.' });
 
     try {
@@ -282,11 +279,11 @@ app.post('/api/dev/initiate-upgrade', authenticateToken, async (req, res) => {
             metadata: { developerId: req.user.id, tier: tier, type: 'saas_upgrade' },
             callback_url: 'https://flipstack.store/dashboard.html?upgrade=success'
         };
-        
-        const paystackResponse = await axios.post('https://api.paystack.co/transaction/initialize', payload, { 
-            headers: { Authorization: `Bearer ${secretKey}` } 
+
+        const paystackResponse = await axios.post('https://api.paystack.co/transaction/initialize', payload, {
+            headers: { Authorization: `Bearer ${secretKey}` }
         });
-        
+
         res.json({ success: true, authorization_url: paystackResponse.data.data.authorization_url });
     } catch (err) {
         const paystackError = err.response?.data?.message || err.message;
@@ -301,24 +298,32 @@ app.post('/api/dev/downgrade-tier', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
+// FIX 3 + 4: timing-safe compare + try/catch wrapper
 app.post('/api/webhooks/flipstack', async (req, res) => {
-    const signature = req.headers['x-paystack-signature'];
-    const secretKey = process.env.FLIPSTACK_PAYSTACK_SECRET;
-    if (!signature || !secretKey) return res.status(400).send('No signature or key configured');
-    
-    const expectedSignature = crypto.createHmac('sha512', secretKey).update(req.rawBody).digest('hex');
-    if (signature !== expectedSignature) return res.status(401).send('Invalid signature');
+    try {
+        const signature = req.headers['x-paystack-signature'];
+        const secretKey = process.env.FLIPSTACK_PAYSTACK_SECRET;
+        if (!signature || !secretKey) return res.status(400).send('No signature or key configured');
 
-    const event = req.body;
-    if (event.event === 'charge.success') {
-        const metadata = event.data.metadata;
-        if (metadata && metadata.type === 'saas_upgrade') {
-            const { developerId, tier } = metadata;
-            await developers.updateOne({ _id: new ObjectId(developerId) }, { $set: { tier: tier } });
-            console.log(`[SaaS Upgrade] Developer ${developerId} successfully upgraded to ${tier}`);
+        const expectedSignature = crypto.createHmac('sha512', secretKey).update(req.rawBody).digest('hex');
+        const sigBuf = Buffer.from(signature);
+        const expBuf = Buffer.from(expectedSignature);
+        if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return res.status(401).send('Invalid signature');
+
+        const event = req.body;
+        if (event.event === 'charge.success') {
+            const metadata = event.data.metadata;
+            if (metadata && metadata.type === 'saas_upgrade') {
+                const { developerId, tier } = metadata;
+                await developers.updateOne({ _id: new ObjectId(developerId) }, { $set: { tier: tier } });
+                console.log(`[SaaS Upgrade] Developer ${developerId} successfully upgraded to ${tier}`);
+            }
         }
+        res.status(200).send('Webhook received');
+    } catch (err) {
+        console.error('[FLIPSTACK_WEBHOOK_ERROR]', err.message);
+        res.status(500).send('Webhook processing error');
     }
-    res.status(200).send('Webhook received');
 });
 
 app.get('/api/dev/export-csv', authenticateToken, async (req, res) => {
@@ -350,7 +355,7 @@ app.get('/api/apps', authenticateToken, async (req, res) => {
             category: app.category, description: app.description, price: app.price,
             icon_url: app.icon_url || '', screenshot_url: app.screenshot_url || '',
             aspect_ratio: app.aspect_ratio, app_url: app.app_url || '', created_at: app.created_at,
-            splash_paid: app.splash_paid || false, splash_status: app.splash_status || 'none', 
+            splash_paid: app.splash_paid || false, splash_status: app.splash_status || 'none',
             splash_video_url: app.splash_video_url || '',
             splash_video_url_b: app.splash_video_url_b || '',
             is_archived: app.is_archived || false
@@ -367,9 +372,9 @@ app.post('/api/apps', authenticateToken, upload.fields([
     try {
         const dev = await developers.findOne({ _id: new ObjectId(req.user.id) });
         const devTier = dev.tier || 'free';
-        
+
         const appCount = await apps.countDocuments({ developerId: req.user.id, is_archived: { $ne: true } });
-        
+
         if (devTier === 'free' && appCount >= 1) return res.status(403).json({ error: 'Free tier limit reached (1 Active App). Archive an old app or upgrade to Pro.' });
         if (devTier === 'pro' && appCount >= 3) return res.status(403).json({ error: 'Pro tier limit reached (3 Active Apps). Archive an old app or upgrade to Studio.' });
         if (devTier === 'studio' && appCount >= 10) return res.status(403).json({ error: 'Studio tier limit reached (10 Active Apps). Archive an old app.' });
@@ -406,11 +411,11 @@ app.post('/api/apps', authenticateToken, upload.fields([
         };
         await apps.insertOne(newApp);
         res.status(201).json({ success: true, app_id });
-    } catch (err) { 
+    } catch (err) {
         if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
             return res.status(413).json({ error: 'File too large. The maximum allowed size for an APK is 100MB.' });
         }
-        res.status(500).json({ error: 'Failed to register app' }); 
+        res.status(500).json({ error: 'Failed to register app' });
     }
 });
 
@@ -426,7 +431,7 @@ app.put('/api/apps/:id/archive', authenticateToken, async (req, res) => {
             const devTier = dev.tier || 'free';
             const activeCount = await apps.countDocuments({ developerId: req.user.id, is_archived: { $ne: true } });
             const limit = devTier === 'free' ? 1 : devTier === 'pro' ? 3 : 10;
-            
+
             if (activeCount >= limit) {
                 return res.status(403).json({ error: 'Active app limit reached. Upgrade your tier or archive another app to unarchive this one.' });
             }
@@ -471,11 +476,11 @@ app.put('/api/apps/:id', authenticateToken, upload.fields([
             if (result.matchedCount === 0) return res.status(404).json({ error: 'App not found' });
         }
         res.json({ success: true });
-    } catch (err) { 
+    } catch (err) {
         if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
             return res.status(413).json({ error: 'File too large. The maximum allowed size for an APK is 100MB.' });
         }
-        res.status(500).json({ error: 'Failed to update app' }); 
+        res.status(500).json({ error: 'Failed to update app' });
     }
 });
 
@@ -504,18 +509,18 @@ app.post('/api/analytics/track', async (req, res) => {
     try {
         const appRecord = await apps.findOne({ app_id });
         if (!appRecord) return res.status(404).send();
-        
+
         const date = new Date().toISOString().split('T')[0];
-        
+
         let incField = { count: 1 };
         if (variant === 'A') incField['variant_a_clicks'] = 1;
         if (variant === 'B') incField['variant_b_clicks'] = 1;
 
         await analytics_views.updateOne(
             { app_id, date },
-            { 
-                $inc: incField, 
-                $setOnInsert: { developerId: appRecord.developerId, count: 0, variant_a_clicks: 0, variant_b_clicks: 0 } 
+            {
+                $inc: incField,
+                $setOnInsert: { developerId: appRecord.developerId, count: 0, variant_a_clicks: 0, variant_b_clicks: 0 }
             },
             { upsert: true }
         );
@@ -530,7 +535,7 @@ app.get('/api/dev/analytics', authenticateToken, async (req, res) => {
         const totalSales = txs.length;
         const totalRevenue = txs.reduce((sum, tx) => sum + tx.amount, 0);
         const views = await analytics_views.find({ developerId: devId }).toArray();
-        
+
         const totalViews = views.reduce((sum, v) => sum + (v.count || 0), 0);
         const totalVariantA = views.reduce((sum, v) => sum + (v.variant_a_clicks || 0), 0);
         const totalVariantB = views.reduce((sum, v) => sum + (v.variant_b_clicks || 0), 0);
@@ -556,9 +561,9 @@ app.get('/api/storefront/apps', async (req, res) => {
     try {
         const host = req.headers.host;
         const isMainDomain = host.includes('flipstack.store') || host.includes('154.66.198.207') || host.includes('localhost');
-        
+
         let query = { is_archived: { $ne: true } };
-        
+
         if (CUSTOM_DOMAINS_ENABLED && !isMainDomain) {
             const dev = await developers.findOne({ custom_domain: host });
             if (dev) {
@@ -569,12 +574,12 @@ app.get('/api/storefront/apps', async (req, res) => {
         }
 
         const allApps = await apps.find(query).toArray();
-        
+
         const categoryWeights = {
-            "Games": 1, "Education": 2, "Music": 3, "Utilities": 4, 
-            "Productivity": 5, "Calculators": 6, "Tools": 7, 
-            "Photography": 8, "Health": 9, "Finance": 10, 
-            "Developer Tools": 11, "Creative & Design": 12, 
+            "Games": 1, "Education": 2, "Music": 3, "Utilities": 4,
+            "Productivity": 5, "Calculators": 6, "Tools": 7,
+            "Photography": 8, "Health": 9, "Finance": 10,
+            "Developer Tools": 11, "Creative & Design": 12,
             "Lifestyle & Wellness": 13, "Social & Niche": 14
         };
 
@@ -588,8 +593,8 @@ app.get('/api/storefront/apps', async (req, res) => {
         const publicApps = allApps.map(app => ({
             app_id: app.app_id, name: app.name, category: app.category || 'App', description: app.description || '', price: app.price || 0,
             icon_url: app.icon_url || '', screenshot_url: app.screenshot_url || '', aspect_ratio: app.aspect_ratio || '9 / 20', app_url: app.app_url || '',
-            splash_video_url: app.splash_video_url || '', 
-            splash_video_url_b: app.splash_video_url_b || '', 
+            splash_video_url: app.splash_video_url || '',
+            splash_video_url_b: app.splash_video_url_b || '',
             splash_status: app.splash_status || 'none'
         }));
         res.json({ apps: publicApps, is_custom_domain: CUSTOM_DOMAINS_ENABLED && !isMainDomain });
@@ -602,15 +607,15 @@ app.get('/api/storefront/app/:app_id', async (req, res) => {
         const appRecord = await apps.findOne({ app_id: req.params.app_id });
         if (!appRecord) return res.status(404).json({ error: 'App not found' });
         if (appRecord.is_archived) return res.status(404).json({ error: 'App has been archived by the developer.' });
-        
+
         const dev = await developers.findOne({ _id: new ObjectId(appRecord.developerId) });
         const devName = dev ? dev.name : 'Indie Developer';
 
-        res.json({ 
+        res.json({
             app: {
                 app_id: appRecord.app_id, name: appRecord.name, category: appRecord.category || 'App', description: appRecord.description || '', price: appRecord.price || 0,
                 icon_url: appRecord.icon_url || '', screenshot_url: appRecord.screenshot_url || '', aspect_ratio: appRecord.aspect_ratio || '9 / 20', app_url: appRecord.app_url || '',
-                splash_video_url: appRecord.splash_video_url || '', 
+                splash_video_url: appRecord.splash_video_url || '',
                 splash_video_url_b: appRecord.splash_video_url_b || '',
                 splash_status: appRecord.splash_status || 'none', created_at: appRecord.created_at,
                 developer_name: devName
@@ -626,21 +631,22 @@ app.post('/api/checkout/initiate', async (req, res) => {
         const appRecord = await apps.findOne({ app_id });
         if (!appRecord || appRecord.price <= 0) return res.status(400).json({ error: 'Invalid app or price is 0' });
         if (appRecord.is_archived) return res.status(400).json({ error: 'This app has been archived and is no longer accepting payments.' });
-        
+
         const dev = await developers.findOne({ _id: new ObjectId(appRecord.developerId) });
         const secretKey = decrypt(dev?.paystack_secret_key || appRecord.paystack_secret);
-        
+
         if (!secretKey || !secretKey.startsWith('sk_')) {
             return res.status(400).json({ error: 'Developer Paystack key is missing or invalid. Please contact the developer.' });
         }
 
         const payload = { email, amount: appRecord.price, metadata: { app_id, user_id, custom_fields: [{ display_name: "App Name", variable_name: "app_name", value: appRecord.name }] } };
         const paystackResponse = await axios.post('https://api.paystack.co/transaction/initialize', payload, { headers: { Authorization: `Bearer ${secretKey}` } });
+
         res.json({ success: true, access_code: paystackResponse.data.data.access_code });
-        
-    } catch (err) { 
+
+    } catch (err) {
         const paystackError = err.response?.data?.message || err.message;
-        res.status(500).json({ error: `Payment Gateway Error: ${paystackError}` }); 
+        res.status(500).json({ error: `Payment Gateway Error: ${paystackError}` });
     }
 });
 
@@ -676,29 +682,43 @@ app.post('/api/dev/simulate-purchase', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message || 'Failed to simulate purchase' }); }
 });
 
+// FIXES 1 + 2 + 4: timing-safe compare + fallback warning + try/catch wrapper
 app.post('/webhook/:app_id', async (req, res) => {
-    const developer = await apps.findOne({ app_id: req.params.app_id });
-    if (!developer) return res.status(404).send('App not found');
-    const signature = req.headers['x-paystack-signature'];
-    if (!signature) return res.status(400).send('No signature');
-    const dev = await developers.findOne({ _id: new ObjectId(developer.developerId) });
-    const secretKey = decrypt(dev?.paystack_secret_key || developer.paystack_secret);
-    if (!secretKey) return res.status(500).send('No key configured');
-    const expectedSignature = crypto.createHmac('sha512', secretKey).update(req.rawBody).digest('hex');
-    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))) return res.status(401).send('Invalid signature');
+    try {
+        const developer = await apps.findOne({ app_id: req.params.app_id });
+        if (!developer) return res.status(404).send('App not found');
 
-    const event = req.body;
-    if (event.event === 'charge.success') {
-        const userId = event.data.metadata?.user_id;
-        const amount = event.data.amount / 100;
-        const platform_fee = amount * 0.10;
-        if (userId) {
-            await entitlements.updateOne({ app_id: req.params.app_id, user_id: userId }, { $set: { tier: 'pro', updated_at: new Date() } }, { upsert: true });
-            await transactions.insertOne({ developerId: developer.developerId, app_id: req.params.app_id, app_name: developer.name, user_id: userId, amount, platform_fee, reference: event.data.reference, email: event.data.customer.email, status: 'successful', date: new Date() });
-            console.log(`[${developer.name}] Sold User ${userId} for R${amount}. Fee: R${platform_fee}`);
+        const signature = req.headers['x-paystack-signature'];
+        if (!signature) return res.status(400).send('No signature');
+
+        const dev = await developers.findOne({ _id: new ObjectId(developer.developerId) });
+        if (!dev?.paystack_secret_key && developer.paystack_secret) {
+            console.warn(`[WEBHOOK] ${req.params.app_id} using legacy developer.paystack_secret fallback`);
         }
+        const secretKey = decrypt(dev?.paystack_secret_key || developer.paystack_secret);
+        if (!secretKey) return res.status(500).send('No key configured');
+
+        const expectedSignature = crypto.createHmac('sha512', secretKey).update(req.rawBody).digest('hex');
+        const sigBuf = Buffer.from(signature);
+        const expBuf = Buffer.from(expectedSignature);
+        if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return res.status(401).send('Invalid signature');
+
+        const event = req.body;
+        if (event.event === 'charge.success') {
+            const userId = event.data.metadata?.user_id;
+            const amount = event.data.amount / 100;
+            const platform_fee = amount * 0.10;
+            if (userId) {
+                await entitlements.updateOne({ app_id: req.params.app_id, user_id: userId }, { $set: { tier: 'pro', updated_at: new Date() } }, { upsert: true });
+                await transactions.insertOne({ developerId: developer.developerId, app_id: req.params.app_id, app_name: developer.name, user_id: userId, amount, platform_fee, reference: event.data.reference, email: event.data.customer.email, status: 'successful', date: new Date() });
+                console.log(`[${developer.name}] Sold User ${userId} for R${amount}. Fee: R${platform_fee}`);
+            }
+        }
+        res.status(200).send('Webhook received');
+    } catch (err) {
+        console.error(`[APP_WEBHOOK_ERROR] ${req.params.app_id}:`, err.message);
+        res.status(500).send('Webhook processing error');
     }
-    res.status(200).send('Webhook received');
 });
 
 startServer();
