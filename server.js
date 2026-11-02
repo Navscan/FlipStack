@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const { exec } = require('child_process');
 const { MongoClient, ObjectId } = require('mongodb');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -10,6 +11,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const sharp = require('sharp');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const splashRoutes = require('./routes/splash');
@@ -17,12 +19,12 @@ const { encrypt, decrypt } = require('./lib/crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 const CUSTOM_DOMAINS_ENABLED = false;
 
 const apkDir = '/var/www/flipstack-frontend/uploads/apks';
 const iconDir = '/var/www/flipstack-frontend/uploads/icons';
 const screenshotDir = '/var/www/flipstack-frontend/uploads/screenshots';
+
 if (!fs.existsSync(apkDir)) fs.mkdirSync(apkDir, { recursive: true });
 if (!fs.existsSync(iconDir)) fs.mkdirSync(iconDir, { recursive: true });
 if (!fs.existsSync(screenshotDir)) fs.mkdirSync(screenshotDir, { recursive: true });
@@ -41,10 +43,10 @@ const upload = multer({
 });
 
 app.use(cors({
-    origin: ['https://flipstack.store', 'https://www.flipstack.store'],
+    origin: ['https://flipstack.store', 'https://www.flipstack.store', 'https://api.flipstack.store'],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Cerberus-Token']
 }));
 
 app.use(cookieParser());
@@ -52,6 +54,14 @@ app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 const client = new MongoClient(process.env.MONGODB_URI);
 let db, entitlements, apps, developers, transactions, analytics_views;
+
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+});
 
 const checkApiLimit = async (req, res, next) => {
     try {
@@ -66,8 +76,8 @@ const checkApiLimit = async (req, res, next) => {
         const limit = tier === 'free' ? 1000 : tier === 'pro' ? 5000 : 50000;
         const currentCalls = dev.api_calls_this_month || 0;
         const lastReset = dev.last_api_reset ? new Date(dev.last_api_reset) : new Date();
-        const now = new Date();
 
+        const now = new Date();
         let callsToSet = currentCalls;
         if (now.getMonth() !== lastReset.getMonth() || now.getFullYear() !== lastReset.getFullYear()) {
             callsToSet = 0;
@@ -95,7 +105,6 @@ async function startServer() {
             try {
                 const app_id = req.params.app_id;
                 const appRecord = await apps.findOne({ app_id });
-
                 const htmlPath = path.join('/var/www/flipstack-frontend', 'app.html');
                 let html = fs.readFileSync(htmlPath, 'utf8');
 
@@ -115,7 +124,6 @@ async function startServer() {
                     html = html.replace(/<meta name="twitter:description" content="[^"]*"/, `<meta name="twitter:description" content="${safeDesc}"`);
                     html = html.replace(/<meta name="twitter:image" content="[^"]*"/, `<meta name="twitter:image" content="${imageUrl}"`);
                 }
-
                 res.send(html);
             } catch (err) {
                 console.error('OG Injection Error:', err);
@@ -126,7 +134,6 @@ async function startServer() {
         app.get('/sitemap.xml', async (req, res) => {
             try {
                 const allApps = await apps.find({ is_archived: { $ne: true } }).toArray();
-
                 let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
                 xml += `    <url>\n        <loc>https://flipstack.store/</loc>\n        <changefreq>daily</changefreq>\n        <priority>1.0</priority>\n    </url>\n`;
 
@@ -141,7 +148,7 @@ async function startServer() {
             }
         });
 
-        app.listen(PORT, () => console.log(`FlipStack listening on port ${PORT}`));
+        app.listen(PORT, '127.0.0.1', () => console.log(`FlipStack listening on localhost:${PORT}`));
     } catch (err) { console.error('Failed to connect to MongoDB', err); }
 }
 
@@ -156,6 +163,135 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
+// CONTACT FORM ROUTE
+app.post('/api/contact', async (req, res) => {
+    const { email, phone, message } = req.body;
+    if (!email || !message) return res.status(400).json({ success: false, error: 'Missing email or message' });
+
+    try {
+        const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: process.env.EMAIL_USER,
+            subject: 'Advertising inquiry - DownloadMaster',
+            text: `New inquiry from ${email}\nPhone: ${phone || 'N/A'}\nMessage:\n${message}`
+        };
+        await transporter.sendMail(mailOptions);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Email error:', err);
+        res.status(500).json({ success: false, error: 'Failed to send email' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// CERBERUS PROTOCOL — SYSTEM SECURITY DASHBOARD
+// GET /api/cerberus/status
+// Auth: if process.env.CERBERUS_API_KEY is set, header X-Cerberus-Token must match.
+// ---------------------------------------------------------------------------
+const runShell = (cmd) => new Promise((resolve) => {
+    exec(cmd, { timeout: 5000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        resolve({ ok: !err, stdout: (stdout || '').toString(), stderr: (stderr || '').toString() });
+    });
+});
+
+app.get('/api/cerberus/status', async (req, res) => {
+    const expectedToken = process.env.CERBERUS_API_KEY;
+    if (expectedToken) {
+        const provided = req.headers['x-cerberus-token']
+            || (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
+        if (provided !== expectedToken) {
+            return res.status(401).json({ ok: false, error: 'unauthorized' });
+        }
+    }
+
+    try {
+        const [uptimeRaw, memRaw, diskRaw, jailsRaw, failedRaw] = await Promise.all([
+            runShell('cat /proc/uptime'),
+            runShell('free -b'),
+            runShell('df -B1 /'),
+            runShell('sudo -n /usr/bin/fail2ban-client status 2>/dev/null || true'),
+            runShell('systemctl --failed --no-legend --plain 2>/dev/null || true')
+        ]);
+
+        // Uptime
+        let uptimeSeconds = 0;
+        if (uptimeRaw.ok) {
+            const parts = uptimeRaw.stdout.trim().split(/\s+/);
+            uptimeSeconds = Math.round(parseFloat(parts[0] || '0')) || 0;
+        }
+
+        // Memory
+        let mem = { total: 0, used: 0, free: 0, percent: 0 };
+        if (memRaw.ok) {
+            const memLine = memRaw.stdout.split('\n').find(l => l.startsWith('Mem:'));
+            if (memLine) {
+                const p = memLine.trim().split(/\s+/);
+                const total = parseInt(p[1], 10) || 0;
+                const used = parseInt(p[2], 10) || 0;
+                const free = parseInt(p[3], 10) || 0;
+                mem = { total, used, free, percent: total > 0 ? Math.round((used / total) * 100) : 0 };
+            }
+        }
+
+        // Disk (root filesystem)
+        let disk = { total: 0, used: 0, free: 0, percent: 0 };
+        if (diskRaw.ok) {
+            const lines = diskRaw.stdout.trim().split('\n');
+            if (lines.length > 1) {
+                const p = lines[1].trim().split(/\s+/);
+                const total = parseInt(p[1], 10) || 0;
+                const used = parseInt(p[2], 10) || 0;
+                const free = parseInt(p[3], 10) || 0;
+                const pct = parseInt((p[4] || '0%').replace('%', ''), 10) || 0;
+                disk = { total, used, free, percent: pct };
+            }
+        }
+
+        // Fail2ban jails
+        let jails = [];
+        if (jailsRaw.ok) {
+            const m = jailsRaw.stdout.match(/Jail list:\s*(.+)/);
+            if (m && m[1].trim()) {
+                jails = m[1].split(',').map(s => s.trim()).filter(Boolean);
+            }
+        }
+
+        let bannedTotal = 0;
+        const recentBanned = [];
+        for (const jail of jails) {
+            const r = await runShell(`sudo -n /usr/bin/fail2ban-client status ${jail} 2>/dev/null || true`);
+            if (!r.stdout) continue;
+            const cur = r.stdout.match(/Currently banned:\s*(\d+)/);
+            const ips = r.stdout.match(/Banned IP list:\s*(.+)/);
+            bannedTotal += cur ? (parseInt(cur[1], 10) || 0) : 0;
+            if (ips && ips[1].trim()) {
+                ips[1].trim().split(/\s+/).forEach(ip => recentBanned.push({ ip, jail }));
+            }
+        }
+
+        // Failed systemd units
+        const failedServices = [];
+        if (failedRaw.ok && failedRaw.stdout.trim()) {
+            failedRaw.stdout.trim().split('\n').forEach(line => {
+                const p = line.trim().split(/\s+/);
+                if (p[0] && /\.(service|socket|timer|mount|path|target)$/.test(p[0])) {
+                    failedServices.push(p[0]);
+                }
+            });
+        }
+
+        res.json({
+            ok: true,
+            timestamp: new Date().toISOString(),
+            system: { uptimeSeconds, mem, disk },
+            fail2ban: { jails, bannedTotal, recentBanned: recentBanned.slice(0, 20) },
+            failedServices
+        });
+    } catch (err) {
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
 // AUTH ROUTES
 app.post('/api/auth/register', async (req, res) => {
     const { email, password, name } = req.body;
@@ -163,8 +299,10 @@ app.post('/api/auth/register', async (req, res) => {
     try {
         const existing = await developers.findOne({ email: email.toLowerCase() });
         if (existing) return res.status(400).json({ error: 'Email already exists' });
+
         const salt = await bcrypt.genSalt(12);
         const hash = await bcrypt.hash(password, salt);
+
         await developers.insertOne({ email: email.toLowerCase(), password: hash, name, tier: 'free', api_calls_this_month: 0, last_api_reset: new Date(), created_at: new Date() });
         res.status(201).json({ success: true });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
@@ -175,8 +313,10 @@ app.post('/api/auth/login', async (req, res) => {
     try {
         const dev = await developers.findOne({ email: email.toLowerCase() });
         if (!dev || !(await bcrypt.compare(password, dev.password))) return res.status(401).json({ error: 'Invalid credentials' });
+
         const accessToken = jwt.sign({ id: dev._id.toString(), email: dev.email }, process.env.JWT_SECRET, { expiresIn: '24h' });
         const refreshToken = jwt.sign({ id: dev._id.toString() }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+
         res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 7 * 24 * 60 * 60 * 1000 });
         res.json({ accessToken, developer: { id: dev._id, email: dev.email, name: dev.name, tier: dev.tier || 'free', custom_domain: dev.custom_domain || '' } });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
@@ -235,6 +375,7 @@ app.put('/api/dev/password', authenticateToken, async (req, res) => {
     try {
         const dev = await developers.findOne({ _id: new ObjectId(req.user.id) });
         if (!dev || !(await bcrypt.compare(current_password, dev.password))) return res.status(401).json({ error: 'Incorrect current password' });
+
         const salt = await bcrypt.genSalt(12);
         const hash = await bcrypt.hash(new_password, salt);
         await developers.updateOne({ _id: new ObjectId(req.user.id) }, { $set: { password: hash } });
@@ -265,7 +406,6 @@ app.put('/api/dev/custom-domain', authenticateToken, async (req, res) => {
 app.post('/api/dev/initiate-upgrade', authenticateToken, async (req, res) => {
     const { tier } = req.body;
     if (!['pro', 'studio'].includes(tier)) return res.status(400).json({ error: 'Invalid tier' });
-
     const amount = tier === 'pro' ? 14900 : 39900;
     const secretKey = process.env.FLIPSTACK_PAYSTACK_SECRET;
 
@@ -279,11 +419,9 @@ app.post('/api/dev/initiate-upgrade', authenticateToken, async (req, res) => {
             metadata: { developerId: req.user.id, tier: tier, type: 'saas_upgrade' },
             callback_url: 'https://flipstack.store/dashboard.html?upgrade=success'
         };
-
         const paystackResponse = await axios.post('https://api.paystack.co/transaction/initialize', payload, {
             headers: { Authorization: `Bearer ${secretKey}` }
         });
-
         res.json({ success: true, authorization_url: paystackResponse.data.data.authorization_url });
     } catch (err) {
         const paystackError = err.response?.data?.message || err.message;
@@ -298,7 +436,6 @@ app.post('/api/dev/downgrade-tier', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
-// FIX 3 + 4: timing-safe compare + try/catch wrapper
 app.post('/api/webhooks/flipstack', async (req, res) => {
     try {
         const signature = req.headers['x-paystack-signature'];
@@ -330,8 +467,10 @@ app.get('/api/dev/export-csv', authenticateToken, async (req, res) => {
     try {
         const dev = await developers.findOne({ _id: new ObjectId(req.user.id) });
         if (dev.tier !== 'studio') return res.status(403).json({ error: 'CSV Export is a Studio Tier feature. Please upgrade.' });
+
         const txs = await transactions.find({ developerId: req.user.id }).sort({ date: -1 }).toArray();
         let csv = 'Date,App Name,Amount (ZAR),Platform Fee (ZAR),Customer Email,Reference,Status\n';
+
         txs.forEach(tx => {
             const date = new Date(tx.date).toISOString().split('T')[0];
             const fee = tx.platform_fee || 0;
@@ -339,6 +478,7 @@ app.get('/api/dev/export-csv', authenticateToken, async (req, res) => {
             const email = `"${tx.email.replace(/"/g, '""')}"`;
             csv += `${date},${appName},${tx.amount},${fee},${email},${tx.reference},${tx.status}\n`;
         });
+
         res.header('Content-Type', 'text/csv');
         res.attachment(`flipstack-export-${Date.now()}.csv`);
         res.send(csv);
@@ -497,7 +637,9 @@ app.get('/api/dev/payouts', authenticateToken, async (req, res) => {
         const txs = await transactions.find({ developerId: req.user.id }).sort({ date: -1 }).toArray();
         const total_revenue = txs.reduce((sum, tx) => sum + tx.amount, 0);
         const total_platform_fees = txs.reduce((sum, tx) => sum + (tx.platform_fee || 0), 0);
+
         const formattedTxs = txs.map(tx => ({ id: tx._id, app_name: tx.app_name, amount: tx.amount, platform_fee: tx.platform_fee || 0, date: tx.date, status: tx.status }));
+
         res.json({ total_revenue, total_platform_fees, transactions: formattedTxs });
     } catch (err) { res.status(500).json({ error: 'Failed to fetch payouts' }); }
 });
@@ -511,7 +653,6 @@ app.post('/api/analytics/track', async (req, res) => {
         if (!appRecord) return res.status(404).send();
 
         const date = new Date().toISOString().split('T')[0];
-
         let incField = { count: 1 };
         if (variant === 'A') incField['variant_a_clicks'] = 1;
         if (variant === 'B') incField['variant_b_clicks'] = 1;
@@ -676,13 +817,13 @@ app.post('/api/dev/simulate-purchase', authenticateToken, async (req, res) => {
     try {
         const appRecord = await apps.findOne({ app_id, developerId: req.user.id });
         if (!appRecord) return res.status(404).json({ error: 'App not found or unauthorized' });
+
         await entitlements.updateOne({ app_id, user_id }, { $set: { tier: 'pro', updated_at: new Date() } }, { upsert: true });
         await transactions.insertOne({ developerId: req.user.id, app_id, app_name: appRecord.name, user_id, amount: 0, platform_fee: 0, reference: 'DEV_TEST_' + Date.now(), email: req.user.email || 'dev@test.com', status: 'test_successful', date: new Date() });
         res.json({ success: true, message: 'Test purchase simulated' });
     } catch (err) { res.status(500).json({ error: err.message || 'Failed to simulate purchase' }); }
 });
 
-// FIXES 1 + 2 + 4: timing-safe compare + fallback warning + try/catch wrapper
 app.post('/webhook/:app_id', async (req, res) => {
     try {
         const developer = await apps.findOne({ app_id: req.params.app_id });
@@ -695,6 +836,7 @@ app.post('/webhook/:app_id', async (req, res) => {
         if (!dev?.paystack_secret_key && developer.paystack_secret) {
             console.warn(`[WEBHOOK] ${req.params.app_id} using legacy developer.paystack_secret fallback`);
         }
+
         const secretKey = decrypt(dev?.paystack_secret_key || developer.paystack_secret);
         if (!secretKey) return res.status(500).send('No key configured');
 
@@ -714,6 +856,7 @@ app.post('/webhook/:app_id', async (req, res) => {
                 console.log(`[${developer.name}] Sold User ${userId} for R${amount}. Fee: R${platform_fee}`);
             }
         }
+
         res.status(200).send('Webhook received');
     } catch (err) {
         console.error(`[APP_WEBHOOK_ERROR] ${req.params.app_id}:`, err.message);
